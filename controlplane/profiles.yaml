@@ -1,0 +1,34 @@
+# The org's Pipeline Profiles — how telemetry ships, per Service Tier.
+#
+# A Profile is the counterpart to a Telemetry Contract, and the split is strict:
+# the Contract says WHAT a service emits, a Profile says HOW it ships (batching,
+# sampling, where it forwards to). Which Signals a tier must emit is neither of
+# those — it is the Service Tier Taxonomy in guardrail/tiers.yaml, enforced by
+# Standard S2. All three are read at Compile time; none restates another.
+#
+# These configure a service's AGENT: receive OTLP, batch, forward to the Gateway.
+# An Agent does no enforcement and names no Backend (ADR 0007) — Backend fan-out
+# is the Gateway's job and lands with C5. A service never edits this: pipeline
+# shape is owned centrally per tier (ADR 0005).
+#
+# C1 ships one Profile, for tier-1, which is the tracer bullet's scope. Compiling
+# a tier with no Profile is a loud error rather than a default, so the missing
+# tier-2 and tier-3 Profiles cannot silently produce a wrong pipeline. C2 (#11)
+# adds them with real per-tier sampling and batching.
+apiVersion: guardrail.otel/v1
+kind: PipelineProfileSet
+
+profiles:
+  - profile: tier-1-critical
+    tiers: [tier-1]
+    description: >-
+      Customer-facing services. Everything is kept: no head sampling, and small
+      batches so telemetry is visible quickly during an incident.
+    gateway_endpoint: otel-gateway.observability.svc.cluster.local:4317
+    batch:
+      timeout: 5s
+      send_batch_size: 8192
+    sampling:
+      # Head sampling percentage at the Agent. 100 means the Agent decides
+      # nothing — the Gateway tail-samples with the whole trace in hand.
+      traces_percent: 100

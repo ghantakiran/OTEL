@@ -58,6 +58,16 @@ jobs:
       - name: A Waiver in force holds its Standard back
         run: ./otel-guardrail check --waivers guardrail/examples/demo-waivers.yaml --as-of 2026-08-01 guardrail/examples/waived-contract.yaml
 
+      - name: A tier-1 Contract compiles to collector config
+        run: ./otel-guardrail compile guardrail/examples/compliant-contract.yaml
+
+      - name: A tier with no Pipeline Profile does not compile
+        run: |
+          if ./otel-guardrail compile guardrail/examples/tier-3-least-signals-contract.yaml; then
+            echo "::error::a Service Tier with no Pipeline Profile compiled anyway"
+            exit 1
+          fi
+
       - name: An expired Waiver holds nothing back
         run: |
           if ./otel-guardrail check --waivers guardrail/examples/demo-waivers.yaml guardrail/examples/expired-waiver-contract.yaml; then

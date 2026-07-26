@@ -27,6 +27,37 @@ type Contract struct {
 // Kind is what a Telemetry Contract file must declare itself to be.
 const Kind = "TelemetryContract"
 
+// Signal is one of the three OTEL telemetry kinds a service emits. The set lives
+// here, in the package that owns the Contract that declares them, so that both
+// the Guardrails and the Control Plane read one definition — the Service Tier
+// Taxonomy names Signals too, and two lists would drift.
+type Signal string
+
+const (
+	SignalTraces  Signal = "traces"
+	SignalMetrics Signal = "metrics"
+	SignalLogs    Signal = "logs"
+)
+
+// Signals is every Signal, in the order they are conventionally listed.
+func Signals() []Signal { return []Signal{SignalTraces, SignalMetrics, SignalLogs} }
+
+// ParseSignal reads a declared Signal name.
+//
+// Note this is not applied when loading a Contract: a Contract naming something
+// that is not a Signal is a finding for a Standard to report, not a file the
+// Guardrail refuses to read. It is applied where an unrecognised Signal would
+// otherwise become a pipeline for telemetry that does not exist.
+func ParseSignal(declared string) (Signal, error) {
+	for _, signal := range Signals() {
+		if Signal(declared) == signal {
+			return signal, nil
+		}
+	}
+	return "", fmt.Errorf("%q is not a Signal; a service emits %s, %s or %s",
+		declared, SignalTraces, SignalMetrics, SignalLogs)
+}
+
 // APIVersion is the schema version this binary understands. It versions the
 // whole guardrail.otel configuration family — Telemetry Contracts, the Waiver
 // register, the enforcement schedule — so all three are declared and checked
