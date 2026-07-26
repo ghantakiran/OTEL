@@ -1,0 +1,83 @@
+name: Waiver expiry
+
+# Scans the Waiver register every day and keeps one tracking issue in step with
+# what it finds. ADR 0003 warns that without a report of soon-to-expire Waivers
+# the escape hatch becomes a permanent hole; ADR 0004 says there is no backend to
+# run such a report, so CI's own scheduler is the whole runtime.
+#
+# The branching lives in .github/scripts/waiver-expiry-issue.sh, which has its
+# own test — .github/scripts/waiver-expiry-issue_test.sh — because a cron that
+# opens a fresh issue every morning is spam, and spam gets muted.
+
+on:
+  schedule:
+    # Daily, early UTC, off the hour: GitHub drops scheduled runs when the
+    # on-the-hour queue is congested.
+    - cron: '17 6 * * *'
+  workflow_dispatch:
+    inputs:
+      within:
+        description: How many days ahead to look for expiring Waivers.
+        required: false
+        default: '30'
+
+permissions:
+  contents: read
+  issues: write
+
+# One run at a time: two concurrent runs could both find no open tracking issue
+# and both open one.
+concurrency:
+  group: waiver-expiry
+  cancel-in-progress: false
+
+jobs:
+  scan:
+    name: Surface Waivers that have expired or are about to
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build the Guardrail
+        run: go build -o "$RUNNER_TEMP/otel-guardrail" ./guardrail/cmd/otel-guardrail
+
+      - name: Scan the Waiver register
+        env:
+          # `inputs.within` is empty on a schedule: run, so fall back to the
+          # command's own default window.
+          WITHIN: ${{ inputs.within || '30' }}
+        run: |
+          set -euo pipefail
+
+          report="$RUNNER_TEMP/waiver-expiry.json"
+          errors="$RUNNER_TEMP/waiver-expiry.err"
+
+          # The exit code is the whole contract with the CLI:
+          #   0 no Waiver needs attention, 1 at least one does, 2 could not run.
+          # `|| code=$?` is deliberate — under `set -e` exit 1 would abort the
+          # step before we could read the code we came here for.
+          code=0
+          "$RUNNER_TEMP/otel-guardrail" waivers --within "$WITHIN" --format json \
+            >"$report" 2>"$errors" || code=$?
+
+          # A register that could not be read is a tooling failure, and reporting
+          # "no Waivers need attention" from it would be a lie that silences the
+          # alert this job exists to raise. Fail the run and file nothing.
+          if [ "$code" -ne 0 ] && [ "$code" -ne 1 ]; then
+            echo "::error title=The Waiver expiry report could not run::$(tr '\n' ' ' <"$errors")"
+            cat "$errors" >&2
+            exit 1
+          fi
+
+          echo "REPORT=$report" >>"$GITHUB_ENV"
+
+      - name: Open, update or close the tracking issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          LABEL: waiver-expiry
+        run: .github/scripts/waiver-expiry-issue.sh

@@ -81,6 +81,16 @@ otel-guardrail check guardrail/examples/expired-waiver-contract.yaml            
 
 `--waivers <path>` points the run at a register other than the one built into the binary — useful when reviewing a change to the register itself.
 
+You do not have to remember to look. `otel-guardrail waivers` reports every Waiver that has already expired or expires within the next 30 days, and a daily scheduled job runs it and keeps a single tracking issue in step with the answer, mentioning each Waiver's approver:
+
+```
+otel-guardrail waivers                     # today, 30-day window
+otel-guardrail waivers --within 90         # a quarter ahead
+otel-guardrail waivers --as-of 2027-03-15  # what March's report will say
+```
+
+See [docs/waiver-expiry.md](./waiver-expiry.md).
+
 ## Worked examples
 
 `guardrail/waivers.yaml` ships two Waivers, one on each path:

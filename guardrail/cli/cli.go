@@ -33,13 +33,23 @@ func Run(args []string, stdout, stderr io.Writer) int {
 	switch args[0] {
 	case "check":
 		return runCheck(args[1:], stdout, stderr)
+	case "waivers":
+		return runWaivers(args[1:], stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "unknown command %q\n\n%s\n", args[0], usage)
 		return exitError
 	}
 }
 
-const usage = `usage: otel-guardrail check [--waivers <waivers.yaml>] [--as-of <YYYY-MM-DD>] <telemetry-contract.yaml>
+const usage = `usage: otel-guardrail <command> [flags]
+
+Commands:
+  check     Run the Preflight Guardrail over a service's Telemetry Contract.
+  waivers   Report Waivers that have expired or are about to. Run
+            'otel-guardrail waivers --help' for its flags.
+
+otel-guardrail check [--waivers <waivers.yaml>] [--enforcement <enforcement.yaml>]
+                     [--as-of <YYYY-MM-DD>] <telemetry-contract.yaml>
 
 Runs the Preflight Guardrail over a declared Telemetry Contract.
 Every violated Standard is reported with its Severity; only a block Severity
