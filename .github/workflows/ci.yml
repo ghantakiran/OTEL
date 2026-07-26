@@ -1,0 +1,37 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go vet ./...
+      - run: go test ./...
+
+  guardrail-examples:
+    name: Preflight Guardrail blocks what it should
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go build -o otel-guardrail ./guardrail/cmd/otel-guardrail
+
+      - name: Compliant Contract passes
+        run: ./otel-guardrail check guardrail/examples/compliant-contract.yaml
+
+      - name: Violating Contract blocks the build
+        run: |
+          if ./otel-guardrail check guardrail/examples/missing-attributes-contract.yaml; then
+            echo "::error::violating Telemetry Contract exited 0 — the Guardrail is not blocking"
+            exit 1
+          fi
