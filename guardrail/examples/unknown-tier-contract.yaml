@@ -1,0 +1,17 @@
+# A Telemetry Contract declaring a Service Tier outside the taxonomy (S2).
+# `tier-0` is not one of tier-1, tier-2, tier-3, so no mandatory Signal set can
+# be determined and the Contract is blocked rather than silently passed.
+# CI runs `otel-guardrail check` over this file and expects a non-zero exit code.
+apiVersion: guardrail.otel/v1
+kind: TelemetryContract
+service_name: edge-router
+owner: team-networking
+tier: tier-0
+signals:
+  - traces
+  - metrics
+  - logs
+resource_attributes:
+  service.name: edge-router
+  service.version: "5.0.0"
+  deployment.environment: production

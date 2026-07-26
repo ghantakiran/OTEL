@@ -1,0 +1,14 @@
+# A tier-3 Telemetry Contract that omits the one Signal every Service Tier
+# mandates (S2). tier-3 mandates traces only; this Contract declares logs alone.
+# CI runs `otel-guardrail check` over this file and expects a non-zero exit code.
+apiVersion: guardrail.otel/v1
+kind: TelemetryContract
+service_name: batch-reindexer
+owner: team-search
+tier: tier-3
+signals:
+  - logs
+resource_attributes:
+  service.name: batch-reindexer
+  service.version: "0.4.0"
+  deployment.environment: production

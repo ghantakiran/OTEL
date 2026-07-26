@@ -1,0 +1,15 @@
+# A tier-1 Telemetry Contract that omits a Signal its Service Tier mandates (S2).
+# tier-1 mandates traces, metrics and logs; this Contract declares no metrics.
+# CI runs `otel-guardrail check` over this file and expects a non-zero exit code.
+apiVersion: guardrail.otel/v1
+kind: TelemetryContract
+service_name: payments-api
+owner: team-payments
+tier: tier-1
+signals:
+  - traces
+  - logs
+resource_attributes:
+  service.name: payments-api
+  service.version: "3.1.0"
+  deployment.environment: production

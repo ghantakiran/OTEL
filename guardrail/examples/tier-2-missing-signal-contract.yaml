@@ -1,0 +1,15 @@
+# A tier-2 Telemetry Contract that omits a Signal its Service Tier mandates (S2).
+# tier-2 mandates traces and metrics; this Contract declares traces alone. Logs
+# are not mandatory at tier-2, so their absence is not a violation.
+# CI runs `otel-guardrail check` over this file and expects a non-zero exit code.
+apiVersion: guardrail.otel/v1
+kind: TelemetryContract
+service_name: catalog-search
+owner: team-catalog
+tier: tier-2
+signals:
+  - traces
+resource_attributes:
+  service.name: catalog-search
+  service.version: "1.7.2"
+  deployment.environment: production

@@ -28,7 +28,7 @@ resource_attributes:
 | `kind` | string | Always `TelemetryContract`. |
 | `service_name` | string | The service this Contract governs. |
 | `owner` | string | The team accountable for the service. |
-| `tier` | string | **Service Tier** — criticality, decides which Standards apply and which Signals are mandatory. |
+| `tier` | string | **Service Tier** — criticality, decides which Standards apply and which Signals are mandatory. One of `tier-1`, `tier-2`, `tier-3` ([taxonomy](./service-tiers.md)). |
 | `signals` | list of string | The **Signals** the service emits: `traces`, `metrics`, `logs`. |
 | `resource_attributes` | map of string to string | The resource attributes the service declares it sets. |
 
