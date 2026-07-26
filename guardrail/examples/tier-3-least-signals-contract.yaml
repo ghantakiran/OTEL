@@ -1,0 +1,14 @@
+# A tier-3 Telemetry Contract declaring the smallest Signal set the taxonomy
+# allows. tier-3 mandates traces only, so metrics and logs are optional here.
+# CI runs `otel-guardrail check` over this file and expects exit code 0.
+apiVersion: guardrail.otel/v1
+kind: TelemetryContract
+service_name: docs-site
+owner: team-devex
+tier: tier-3
+signals:
+  - traces
+resource_attributes:
+  service.name: docs-site
+  service.version: "1.0.0"
+  deployment.environment: production
