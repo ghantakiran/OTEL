@@ -108,3 +108,7 @@ config.YAML()               // one rendering, not the thing itself
 ```
 
 `CollectorConfig` is a typed value rather than a string of YAML so that a fleet-wide rollout can ask questions of it — and diff two rollouts by structure rather than formatting — before anything reaches a file.
+
+## Compiling the whole Fleet
+
+`compile` handles one Contract to stdout. `otel-guardrail compile-fleet fleet` compiles every Contract in a **Fleet** into a committed tree of collector configuration, which is how config reaches the fleet at all — see [`docs/gitops-distribution.md`](gitops-distribution.md) for the layout, what happens when a Contract does not compile, and the scheduled job that proposes each **Rollout** as a pull request.

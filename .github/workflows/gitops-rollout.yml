@@ -1,0 +1,76 @@
+name: Fleet rollout
+
+# Recompiles the Fleet's Telemetry Contracts every day and proposes the result as a
+# pull request when the committed collector configuration no longer matches them.
+#
+# This is the whole distribution mechanism. ADR 0006 rejects OpAMP: the Control Plane
+# compiles config and commits it, and existing GitOps tooling rolls the merged tree
+# out to the Agents and the Gateway. ADR 0004 says there is no server to run such a
+# loop, so CI's own scheduler is the entire runtime. Nothing here merges anything —
+# a human reviewing the diff is the gate, which only works if the diff is small,
+# deterministic and infrequent.
+#
+# The branching lives in .github/scripts/gitops-rollout-pr.sh, which has its own test
+# — .github/scripts/gitops-rollout-pr_test.sh — because a cron that force-pushes a
+# branch and opens a fresh pull request every morning is spam, spam gets muted, and
+# a muted rollout is worse than none: nobody reads the diff that was the review gate.
+
+on:
+  schedule:
+    # Daily, early UTC, off the hour: GitHub drops scheduled runs when the
+    # on-the-hour queue is congested.
+    - cron: '43 6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+# One run at a time. Two concurrent runs could both find no open rollout pull
+# request and both open one, and could force-push over each other's branch.
+concurrency:
+  group: fleet-rollout
+  cancel-in-progress: false
+
+jobs:
+  rollout:
+    name: Propose the fleet's compiled collector configuration
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history so that comparing this run's compiled tree against the
+          # rollout branch already on the remote is unambiguous, and so the branch
+          # can be rebuilt from the base branch rather than stacked onto.
+          # Compiling itself needs no history: unlike `check`, it never dates a
+          # service from git.
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build the Control Plane
+        run: go build -o "$RUNNER_TEMP/otel-guardrail" ./guardrail/cmd/otel-guardrail
+
+      # Recompiles the Fleet in the working tree and captures the JSON report. The
+      # exit-code branching is in a script so it can be tested: the difference
+      # between "one Contract is broken" and "the compiler is broken" decides
+      # whether a half-compiled fleet gets proposed as though it were the fleet.
+      - name: Compile the Fleet
+        env:
+          FLEET: fleet
+        run: |
+          GUARDRAIL="$RUNNER_TEMP/otel-guardrail" \
+          REPORT="$RUNNER_TEMP/fleet-rollout.json" \
+            .github/scripts/gitops-rollout-compile.sh
+
+      - name: Open, update or close the rollout pull request
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          FLEET: fleet
+          BRANCH: gitops/fleet-rollout
+          BASE: ${{ github.ref_name }}
+          LABEL: fleet-rollout
+        run: .github/scripts/gitops-rollout-pr.sh
