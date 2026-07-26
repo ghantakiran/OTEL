@@ -64,8 +64,33 @@ func parseEnforcementSchedule(data []byte, origin string) (*EnforcementSchedule,
 		return nil, fmt.Errorf("enforcement schedule %s: kind is %q, want %q", origin, document.Kind, scheduleKind)
 	}
 
+	// A zero Date is not a missing value the caller can notice later — it reads as
+	// the year 1, which every real date is after. An absent or misspelt `epoch:`
+	// would therefore classify every service as new and block the entire fleet at
+	// once, silently. The Waiver register refuses a Waiver with no expiry for
+	// exactly this reason; this refuses the same shape of mistake.
+	if document.Epoch.IsZero() {
+		return nil, fmt.Errorf(
+			"enforcement schedule %s publishes no Enforcement Epoch: set `epoch: YYYY-MM-DD`, "+
+				"or every service is classified new and every blocking Standard blocks the whole fleet at once",
+			origin)
+	}
+
 	schedule := &EnforcementSchedule{epoch: document.Epoch, graduations: map[string]Date{}}
 	for _, g := range document.Graduations {
+		if g.Standard == "" {
+			return nil, fmt.Errorf("enforcement schedule %s has a graduation naming no Standard: set `standard:` on each entry", origin)
+		}
+		// Same trap, opposite direction: a zero deadline reads as one that has
+		// already arrived, so the Standard would be published *and* block legacy
+		// services immediately. A misspelt `standard:` key already fails loudly;
+		// its neighbour must not fail silently.
+		if g.Graduates.IsZero() {
+			return nil, fmt.Errorf(
+				"enforcement schedule %s gives Standard %q no graduation deadline: set `graduates: YYYY-MM-DD`, "+
+					"or it blocks every legacy service the day it is published",
+				origin, g.Standard)
+		}
 		schedule.graduations[g.Standard] = g.Graduates
 	}
 	return schedule, nil
@@ -148,6 +173,16 @@ type FirstAppearance func() (time.Time, error)
 // not the service team's to declare — and not theirs to backdate.
 func FirstAppearanceInGit(contractPath string) FirstAppearance {
 	return func() (time.Time, error) {
+		// Absence of history must be detected, never inferred from a failed
+		// lookup. A shallow clone grafts its tip commit as parentless, so git
+		// happily reports every file in it as *added* in that tip — the lookup
+		// below would succeed and return today, classifying every legacy service
+		// as new and blocking the whole fleet at once. That failure is silent,
+		// and it is the one ADR 0003 exists to prevent, so it is checked first.
+		if err := requireFullHistory(contractPath); err != nil {
+			return time.Time{}, err
+		}
+
 		// --reverse puts the commit that added the file first; --diff-filter=A
 		// keeps it to additions, so a later rename or rewrite cannot reset the clock.
 		command := exec.Command("git", "log", "--diff-filter=A", "--format=%aI", "--reverse", "--", filepath.Base(contractPath))
@@ -169,6 +204,31 @@ func FirstAppearanceInGit(contractPath string) FirstAppearance {
 		}
 		return appeared, nil
 	}
+}
+
+// requireFullHistory refuses a checkout whose history has been truncated.
+func requireFullHistory(contractPath string) error {
+	shallow := exec.Command("git", "rev-parse", "--is-shallow-repository")
+	shallow.Dir = filepath.Dir(contractPath)
+
+	out, err := shallow.Output()
+	if err != nil {
+		// Not a git repository at all, or git is unavailable. Either way the
+		// Contract cannot be dated; the lookup below reports it in full.
+		return nil
+	}
+	if strings.TrimSpace(string(out)) == "true" {
+		return errShallowCheckout(contractPath)
+	}
+	return nil
+}
+
+func errShallowCheckout(contractPath string) error {
+	return fmt.Errorf(
+		"cannot tell when %s first appeared: this is a shallow clone, so its history does not reach the commit "+
+			"that added the Contract, and the Enforcement Epoch cannot classify this service as new or legacy. "+
+			"Check out full history (actions/checkout with fetch-depth: 0)",
+		contractPath)
 }
 
 // errNoContractHistory says what to do about it. Without the first-appearance

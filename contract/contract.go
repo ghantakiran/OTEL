@@ -24,16 +24,27 @@ type Contract struct {
 	ResourceAttributes map[string]string `yaml:"resource_attributes" json:"resource_attributes"`
 }
 
+// Kind is what a Telemetry Contract file must declare itself to be.
+const Kind = "TelemetryContract"
+
 // Load reads a Telemetry Contract from a YAML file.
 func Load(path string) (Contract, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return Contract{}, fmt.Errorf("read contract %s: %w", path, err)
+		return Contract{}, fmt.Errorf("read Telemetry Contract %s: %w", path, err)
 	}
 
 	var c Contract
 	if err := yaml.Unmarshal(data, &c); err != nil {
-		return Contract{}, fmt.Errorf("parse contract %s: %w", path, err)
+		return Contract{}, fmt.Errorf("parse Telemetry Contract %s: %w", path, err)
+	}
+
+	// Every field of another document kind is simply absent from a Contract, so
+	// the wrong file decodes cleanly into an empty one — and the Guardrail then
+	// reports a confident verdict about a service whose name is the empty string.
+	// A wrong path is a Guardrail that could not run, not a service's fault.
+	if c.Kind != Kind {
+		return Contract{}, fmt.Errorf("%s is not a Telemetry Contract: kind is %q, want %q", path, c.Kind, Kind)
 	}
 	return c, nil
 }

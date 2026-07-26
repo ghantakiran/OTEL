@@ -264,6 +264,56 @@ func checkWaived(t *testing.T, register string, asOf time.Time) guardrail.Result
 	return result
 }
 
+func TestAWaiverDoesNotAttachToAViolationThatWasNeverGoingToFailTheBuild(t *testing.T) {
+	// A Waiver downgrades a block Standard to non-failing. A warn Standard is
+	// already non-failing, so there is nothing for a Waiver to do — and pretending
+	// otherwise makes the report name a Waiver that is holding nothing back,
+	// pointing the reader at the wrong expiry date.
+	register := `apiVersion: guardrail.otel/v1
+kind: WaiverRegister
+waivers:
+  - service_name: warn-only-service
+    standard: S3
+    reason: "Filed against a Standard that only warns."
+    approved_by: obs-team
+    expires: 2027-06-01
+`
+	preflight, err := guardrail.NewPreflight(guardrail.StandardPolicies(),
+		guardrail.WithWaivers(registerFrom(t, register)),
+		guardrail.WithClock(func() time.Time { return on(t, "2026-08-01") }))
+	if err != nil {
+		t.Fatalf("new Preflight Guardrail: %v", err)
+	}
+	result, err := preflight.Check(context.Background(), warnOnlyService())
+	if err != nil {
+		t.Fatalf("check: %v", err)
+	}
+
+	if len(result.Advisory()) == 0 {
+		t.Fatal("fixture no longer violates a warn Standard, so this test proves nothing")
+	}
+	if waived := result.Waived(); len(waived) != 0 {
+		t.Errorf("a Waiver attached to a violation that never fails the build: %+v", waived)
+	}
+}
+
+// warnOnlyService violates S3 — and only S3 — so nothing here fails the build.
+func warnOnlyService() contract.Contract {
+	return contract.Contract{
+		APIVersion:  "guardrail.otel/v1",
+		Kind:        "TelemetryContract",
+		ServiceName: "warn-only-service",
+		Owner:       "team-supply-chain",
+		Tier:        "tier-3",
+		Signals:     []string{"traces"},
+		ResourceAttributes: map[string]string{
+			"service.name":           "warn-only-service",
+			"service.version":        "1.4.2",
+			"deployment.environment": "production",
+		},
+	}
+}
+
 // waivedService is a Telemetry Contract violating S1 — and only S1 — so a test
 // can watch one Waiver decide whether the build fails.
 func waivedService() contract.Contract {

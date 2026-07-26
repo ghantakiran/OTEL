@@ -10,6 +10,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Required, and not only for the guardrail-examples job below: the CLI
+          # tests run `check` over the sample Contracts, and `check` always dates
+          # the service from git history. In a shallow clone the Guardrail now
+          # refuses to guess (exit 2) instead of silently classifying every
+          # service as new, so those tests fail without full history — which is
+          # the correct behaviour made visible.
+          fetch-depth: 0
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
