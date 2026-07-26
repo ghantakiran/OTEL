@@ -55,15 +55,20 @@ go build -o "$work/otel-guardrail" "$repo_root/guardrail/cmd/otel-guardrail" || 
 	exit 1
 }
 
+# Read the DEMONSTRATION register, never the org's live one: ADR 0004 makes
+# guardrail/waivers.yaml the source of truth, so filing or retiring a real
+# Waiver must not fail this test.
+demo_register="$repo_root/guardrail/examples/demo-waivers.yaml"
+
 # 2026-07-25: legacy-payments-batch lapsed on 2026-01-15, legacy-inventory goes
 # on 2027-04-01 — one on each path.
-"$work/otel-guardrail" waivers --as-of 2026-07-25 --within 365 --format json >"$work/attention.json"
+"$work/otel-guardrail" waivers --register "$demo_register" --as-of 2026-07-25 --within 365 --format json >"$work/attention.json"
 # 2025-01-01: both Waivers are comfortably in the future.
-"$work/otel-guardrail" waivers --as-of 2025-01-01 --within 30 --format json >"$work/all-clear.json"
+"$work/otel-guardrail" waivers --register "$demo_register" --as-of 2025-01-01 --within 30 --format json >"$work/all-clear.json"
 
 if [ "$(jq '.expired | length' "$work/attention.json")" != "1" ] ||
 	[ "$(jq '.expiring | length' "$work/attention.json")" != "1" ]; then
-	echo "FAIL: the fixture report is not the one/one split these tests assume"
+	echo "FAIL: guardrail/examples/demo-waivers.yaml is not the one-expired/one-expiring split these tests assume"
 	exit 1
 fi
 if [ "$(jq '.expired + .expiring | length' "$work/all-clear.json")" != "0" ]; then

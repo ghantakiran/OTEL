@@ -20,8 +20,10 @@ It does three things:
 
 The command is usable on its own — it is the same thing the cron runs.
 
+Below, run against the demonstration register on a fixed day so the output stays reproducible — the cron itself passes no `--register` and no `--as-of`, so it scans the org's live register as of today.
+
+<!-- verify: waivers --register guardrail/examples/demo-waivers.yaml --as-of 2026-07-25 --within 30 -->
 ```
-$ otel-guardrail waivers --within 30
 1 Waiver to review as of 2026-07-25: 1 already expired, 0 expiring within 30 days
 
 Already expired — the Standard is blocking these services again:
@@ -63,6 +65,8 @@ One issue, labelled **`waiver-expiry`**, titled e.g. `Waiver expiry: 1 expired, 
 | Service | Standard | Expiry | Approved by | Reason it was filed |
 | --- | --- | --- | --- | --- |
 | `legacy-payments-batch` | S1 | 2026-01-15 (191 days ago) | @obs-team | Batch runner read its environment from a decommissioned config service… |
+
+(That row is from the demonstration register as of 2026-07-25; the day count is naturally relative to the run.)
 
 Everything needed to act is in the row, so nobody has to open the register to triage. The approvers recorded on the Waivers are **mentioned**, not assigned: `approved_by` is a free-text approver in the register (`obs-team`), not guaranteed to be a GitHub login, and assigning a non-user either fails the job or gets swallowed silently. If the register ever grows a GitHub handle per approver, switching the mention to an assignment is a one-line change in `build_body`.
 

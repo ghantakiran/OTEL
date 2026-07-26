@@ -26,6 +26,9 @@ jobs:
       # The Waiver-expiry cron's open/update/close branching is bash, so `go
       # test` cannot reach it. Stubs `gh`; creates no issues and needs no auth.
       - run: bash .github/scripts/waiver-expiry-issue_test.sh
+      # The worked examples in docs/ are executable promises. Three of four had
+      # gone stale before anyone noticed, because prose has no test.
+      - run: bash .github/scripts/docs-examples_test.sh
 
   guardrail-examples:
     name: Preflight Guardrail blocks what it should
@@ -53,11 +56,11 @@ jobs:
           fi
 
       - name: A Waiver in force holds its Standard back
-        run: ./otel-guardrail check --as-of 2026-08-01 guardrail/examples/waived-contract.yaml
+        run: ./otel-guardrail check --waivers guardrail/examples/demo-waivers.yaml --as-of 2026-08-01 guardrail/examples/waived-contract.yaml
 
       - name: An expired Waiver holds nothing back
         run: |
-          if ./otel-guardrail check guardrail/examples/expired-waiver-contract.yaml; then
+          if ./otel-guardrail check --waivers guardrail/examples/demo-waivers.yaml guardrail/examples/expired-waiver-contract.yaml; then
             echo "::error::an expired Waiver still held a blocking Standard back"
             exit 1
           fi

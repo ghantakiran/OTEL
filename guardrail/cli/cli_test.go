@@ -66,8 +66,14 @@ func TestCheckReportsTheSeverityAlongsideEachViolation(t *testing.T) {
 	}
 }
 
+// demoWaivers is the register of illustrative Waivers on fixed dates. These
+// tests deliberately do NOT read the org's live register: ADR 0004 makes that
+// file the source of truth, so filing or retiring a real Waiver must not break
+// a test here.
+const demoWaivers = "../examples/demo-waivers.yaml"
+
 func TestCheckLetsThroughAContractWhoseOnlyBlockingStandardIsWaived(t *testing.T) {
-	code, out, errOut := run(t, "check", "--as-of", "2026-08-01", "../examples/waived-contract.yaml")
+	code, out, errOut := run(t, "check", "--waivers", demoWaivers, "--as-of", "2026-08-01", "../examples/waived-contract.yaml")
 
 	if code != 0 {
 		t.Fatalf("exit code = %d, want 0 for a service whose blocking Standard is waived\n%s%s", code, out, errOut)
@@ -75,7 +81,7 @@ func TestCheckLetsThroughAContractWhoseOnlyBlockingStandardIsWaived(t *testing.T
 }
 
 func TestCheckReportsTheWaivedStandardAndTheDateItsWaiverExpires(t *testing.T) {
-	_, out, _ := run(t, "check", "--as-of", "2026-08-01", "../examples/waived-contract.yaml")
+	_, out, _ := run(t, "check", "--waivers", demoWaivers, "--as-of", "2026-08-01", "../examples/waived-contract.yaml")
 
 	if !strings.Contains(out, "S1") || !strings.Contains(out, "deployment.environment") {
 		t.Errorf("the waived violation vanished from the report:\n%s", out)
@@ -90,7 +96,7 @@ func TestCheckReportsTheWaivedStandardAndTheDateItsWaiverExpires(t *testing.T) {
 }
 
 func TestCheckBlocksAgainOnceTheWaiverHasExpired(t *testing.T) {
-	code, out, _ := run(t, "check", "--as-of", "2026-08-01", "../examples/expired-waiver-contract.yaml")
+	code, out, _ := run(t, "check", "--waivers", demoWaivers, "--as-of", "2026-08-01", "../examples/expired-waiver-contract.yaml")
 
 	if code != 1 {
 		t.Fatalf("exit code = %d, want 1: an expired Waiver holds nothing back\n%s", code, out)
@@ -101,13 +107,13 @@ func TestCheckBlocksAgainOnceTheWaiverHasExpired(t *testing.T) {
 }
 
 func TestCheckJudgesWaiverExpiryOnTheDayItIsAskedAbout(t *testing.T) {
-	before, out, _ := run(t, "check", "--as-of", "2027-03-31", "../examples/waived-contract.yaml")
+	before, out, _ := run(t, "check", "--waivers", demoWaivers, "--as-of", "2027-03-31", "../examples/waived-contract.yaml")
 	if before != 0 {
 		t.Fatalf("exit code = %d the day before the Waiver expires, want 0\n%s", before, out)
 	}
 
 	// Nobody edits the register and nobody revokes anything; the day moves on.
-	after, out, _ := run(t, "check", "--as-of", "2027-04-02", "../examples/waived-contract.yaml")
+	after, out, _ := run(t, "check", "--waivers", demoWaivers, "--as-of", "2027-04-02", "../examples/waived-contract.yaml")
 
 	if after != 1 {
 		t.Fatalf("exit code = %d the day after the Waiver expires, want 1\n%s", after, out)

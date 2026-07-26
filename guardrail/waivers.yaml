@@ -1,4 +1,4 @@
-# The org's Waiver register.
+# The org's Waiver register — the source of truth for real exemptions (ADR 0004).
 #
 # A Waiver is a time-boxed, owner-approved exemption letting ONE service skip
 # ONE Standard until an expiry date. Until then the Standard is still reported
@@ -12,27 +12,17 @@
 # `reason`, `approved_by` and `expires` are all required. A Waiver missing any
 # of them is rejected — `otel-guardrail check` exits 2, "the Guardrail could not
 # run" — because an unexplained, unapproved or unbounded Waiver is exactly the
-# permanent hole ADR 0003 warns about.
+# permanent hole ADR 0003 warns about. Two Waivers for the same service and
+# Standard are rejected too: one of them would sit here doing nothing.
+#
+# THIS FILE IS MEANT TO CHANGE. File a Waiver by adding an entry; retire one by
+# deleting it. No test pins its contents — the tests assert only that whatever
+# is here is well-formed. The illustrative Waivers used by the tests and the CI
+# demonstrations live in guardrail/examples/demo-waivers.yaml instead, so that
+# normal operation of this register never breaks a test.
+#
+# An empty register is a good sign, not a broken file: it means no service
+# currently needs an exemption.
 apiVersion: guardrail.otel/v1
 kind: WaiverRegister
-waivers:
-  # Honoured today: legacy-inventory violates S1 and the build still passes,
-  # with the violation and this expiry date printed on every run.
-  - service_name: legacy-inventory
-    standard: S1
-    reason: >-
-      deployment.environment is stamped by the platform sidecar, not by the
-      service; the sidecar rollout for supply-chain lands 2027-03.
-    approved_by: obs-team
-    expires: 2027-04-01
-
-  # Already lapsed: legacy-payments-batch violates the same Standard and the
-  # build fails again. Nobody deleted this entry and nobody revoked anything —
-  # the expiry date simply passed.
-  - service_name: legacy-payments-batch
-    standard: S1
-    reason: >-
-      Batch runner read its environment from a decommissioned config service;
-      deferred until the migration to the platform sidecar completed.
-    approved_by: obs-team
-    expires: 2026-01-15
+waivers: []

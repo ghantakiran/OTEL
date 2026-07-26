@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/ghantakiran/OTEL/guardrail"
 )
 
 func TestTheReportNamesAWaiverExpiringWithinTheWindow(t *testing.T) {
@@ -217,14 +219,44 @@ func TestTheReportCouldNotRunWhenTheWindowIsNegative(t *testing.T) {
 
 func TestTheReportScansTheOrgRegisterWhenNoneIsNamed(t *testing.T) {
 	// The scheduled job runs the command with no --register, so the register
-	// embedded in the binary is the one the org actually gets scanned.
-	code, out, errOut := run(t, "waivers", "--as-of", "2026-07-25", "--within", "365")
+	// embedded in the binary is the one that actually gets scanned. What is
+	// asserted is that wiring, not the register's contents: ADR 0004 makes that
+	// file the source of truth, so filing or retiring a real Waiver must not
+	// break this test. A window wide enough to catch everything means the report
+	// covers exactly what the register holds — including nothing, when it is empty.
+	org, err := guardrail.CentralWaiverRegister()
+	if err != nil {
+		t.Fatalf("the register shipped in the binary does not load: %v", err)
+	}
+
+	_, out, errOut := run(t, "waivers", "--as-of", "2026-07-25", "--within", "100000", "--format", "json")
+
+	var report struct {
+		Expired []struct {
+			ServiceName string `json:"service_name"`
+		} `json:"expired"`
+		Expiring []struct {
+			ServiceName string `json:"service_name"`
+		} `json:"expiring"`
+	}
+	if err := json.Unmarshal([]byte(out), &report); err != nil {
+		t.Fatalf("the report is not the JSON the scheduled job parses: %v\n%s%s", err, out, errOut)
+	}
+	if got, want := len(report.Expired)+len(report.Expiring), len(org.Waivers()); got != want {
+		t.Errorf("the report covers %d Waiver(s), but the org register holds %d", got, want)
+	}
+}
+
+func TestTheReportSeparatesExpiredFromExpiringInTheDemonstrationRegister(t *testing.T) {
+	// The honoured/lapsed split, asserted against the register that exists to
+	// demonstrate it rather than against the org's live one.
+	code, out, errOut := run(t, "waivers", "--register", demoWaivers, "--as-of", "2026-07-25", "--within", "365")
 
 	if code != 1 {
-		t.Fatalf("exit code = %d, want 1: the org register holds a lapsed Waiver\n%s%s", code, out, errOut)
+		t.Fatalf("exit code = %d, want 1: the demonstration register holds a lapsed Waiver\n%s%s", code, out, errOut)
 	}
 	if sectionNaming(out, "legacy-payments-batch") == sectionNaming(out, "legacy-inventory") {
-		t.Errorf("the org register's lapsed and still-in-force Waivers land under one heading:\n%s", out)
+		t.Errorf("lapsed and still-in-force Waivers land under one heading:\n%s", out)
 	}
 }
 

@@ -6,7 +6,7 @@ A Waiver is the escape hatch that makes phased enforcement politically survivabl
 
 ## Where Waivers live
 
-In this repository, in one file: **`guardrail/waivers.yaml`**, next to the Standard catalog.
+In this repository, in one file: **`guardrail/waivers.yaml`**, next to the Standard catalog. It holds real exemptions only; an empty register is a good sign, not a broken file. (Illustrative Waivers used by the tests and CI demonstrations live in `guardrail/examples/demo-waivers.yaml`, so operating the real register never breaks a test — see [Worked examples](#worked-examples).)
 
 Not in service repositories, deliberately:
 
@@ -46,8 +46,9 @@ A Waiver is scoped to exactly one service and one Standard. It does not reach an
 
 It changes **effective enforcement** and nothing else:
 
+<!-- verify: check --waivers guardrail/examples/demo-waivers.yaml --as-of 2026-08-01 guardrail/examples/waived-contract.yaml -->
 ```
-legacy-inventory: nothing fails the build, but 1 blocking Standard violation(s) are only held back by a Waiver; 0 other non-blocking finding(s) to address
+legacy-inventory: nothing fails the build — 1 blocking Standard violation held back by a Waiver
   [block, waived by obs-team until 2027-04-01] S1: required resource attribute "deployment.environment" is not declared
 ```
 
@@ -55,8 +56,9 @@ The violation is still found, still printed, still attributed to `block` Severit
 
 Once the expiry passes, the same Contract on the same register produces:
 
+<!-- verify: check --waivers guardrail/examples/demo-waivers.yaml --as-of 2027-04-02 guardrail/examples/waived-contract.yaml -->
 ```
-legacy-inventory: 1 blocking Standard violation(s), 0 non-blocking
+legacy-inventory: 1 blocking Standard violation failing the build
   [block] S1: required resource attribute "deployment.environment" is not declared
 ```
 
@@ -93,9 +95,11 @@ See [docs/waiver-expiry.md](./waiver-expiry.md).
 
 ## Worked examples
 
-`guardrail/waivers.yaml` ships two Waivers, one on each path:
+The org's register, `guardrail/waivers.yaml`, holds only real exemptions and is often empty. The two Waivers that demonstrate each path live in a separate **demonstration register**, `guardrail/examples/demo-waivers.yaml`:
 
 | Service | Standard | Expires | Example Contract | Result |
 | --- | --- | --- | --- | --- |
 | `legacy-inventory` | S1 | 2027-04-01 | `guardrail/examples/waived-contract.yaml` | Honoured — violation reported, exit `0`. |
 | `legacy-payments-batch` | S1 | 2026-01-15 | `guardrail/examples/expired-waiver-contract.yaml` | Lapsed — S1 blocks again, exit `1`. |
+
+The split is deliberate, and it is what makes this register usable. Fixed dates are needed to demonstrate and test the honoured and lapsed paths — but ADR 0004 makes `guardrail/waivers.yaml` the source of truth for real exemptions, so filing, extending or retiring one must not break a test. Keeping the illustrations elsewhere means the live register can be changed freely, and can sit empty without anything failing.

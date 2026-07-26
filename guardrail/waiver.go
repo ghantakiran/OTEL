@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/ghantakiran/OTEL/contract"
 )
 
 // Waiver is a time-boxed, owner-approved exemption letting one service skip one
@@ -61,11 +63,15 @@ func (d Date) IsZero() bool {
 
 const dateLayout = "2006-01-02"
 
-// UnmarshalYAML reads a plain YYYY-MM-DD scalar.
+// UnmarshalYAML reads a plain YYYY-MM-DD scalar. The message stays neutral about
+// which field it came from: a Date is a Waiver's expiry, the Enforcement Epoch
+// and a graduation deadline, and saying "expiry date" for a bad `epoch:` sent
+// operators grepping the schedule for a word that is not in it. The yaml decoder
+// supplies the line number.
 func (d *Date) UnmarshalYAML(node *yaml.Node) error {
 	day, err := time.Parse(dateLayout, node.Value)
 	if err != nil {
-		return fmt.Errorf("expiry date %q is not a YYYY-MM-DD date", node.Value)
+		return fmt.Errorf("%q is not a YYYY-MM-DD date", node.Value)
 	}
 	d.day = day
 	return nil
@@ -82,9 +88,7 @@ type WaiverRegister struct {
 // registerKind is what a Waiver register file must declare itself to be.
 const registerKind = "WaiverRegister"
 
-// registerDocument is the on-disk shape of the register. APIVersion is read but
-// not yet judged: there is exactly one version, and the day there are two is the
-// day it earns a rule.
+// registerDocument is the on-disk shape of the register.
 type registerDocument struct {
 	APIVersion string   `yaml:"apiVersion"`
 	Kind       string   `yaml:"kind"`
@@ -122,10 +126,29 @@ func parseWaiverRegister(data []byte, origin string) (*WaiverRegister, error) {
 	if document.Kind != registerKind {
 		return nil, fmt.Errorf("Waiver register %s: kind is %q, want %q", origin, document.Kind, registerKind)
 	}
+	// Decoded and ignored was the old behaviour, and it is the one thing this
+	// field must never be: an old binary reading a newer register under this
+	// binary's rules would honour Waivers by rules that no longer apply.
+	if err := contract.RequireAPIVersion(document.APIVersion, origin, "Waiver register"); err != nil {
+		return nil, err
+	}
+	// A Waiver covers exactly one service and one Standard, so two of them for the
+	// same pair means one is inert: present in the register, reading as approved,
+	// doing nothing. Retiring or extending that one changes nothing and the
+	// confusion is unbounded, so the register is refused instead.
+	covered := make(map[string]struct{}, len(document.Waivers))
 	for _, w := range document.Waivers {
 		if err := w.validate(); err != nil {
 			return nil, fmt.Errorf("Waiver register %s: %w", origin, err)
 		}
+		scope := w.ServiceName + "/" + w.Standard
+		if _, twice := covered[scope]; twice {
+			return nil, fmt.Errorf(
+				"Waiver register %s covers %s twice: only one Waiver can hold a Standard back for a service, "+
+					"so the other would sit in the register doing nothing",
+				origin, scope)
+		}
+		covered[scope] = struct{}{}
 	}
 	return &WaiverRegister{waivers: document.Waivers}, nil
 }

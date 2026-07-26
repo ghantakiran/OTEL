@@ -235,14 +235,71 @@ func TestAnExpiredWaiverNoLongerHoldsBackTheStandard(t *testing.T) {
 	}
 }
 
-func TestTheCentralWaiverRegisterShippedWithTheCLIIsComplete(t *testing.T) {
+func TestAWaiverRegisterDeclaringAnApiVersionThisBinaryDoesNotUnderstandIsRefused(t *testing.T) {
+	// A pinned old binary meeting a register written against a later schema would
+	// otherwise honour Waivers under rules that no longer apply — and a Waiver
+	// misread is a Standard silently not enforced.
+	_, err := guardrail.LoadWaiverRegister(writeRegister(t, `apiVersion: guardrail.otel/v99
+kind: WaiverRegister
+waivers: []
+`))
+
+	if err == nil {
+		t.Fatal("a Waiver register declaring an unsupported apiVersion loaded")
+	}
+	if !strings.Contains(err.Error(), "guardrail.otel/v99") {
+		t.Errorf("the error does not name the version found: %v", err)
+	}
+}
+
+func TestTwoWaiversForTheSameServiceAndStandardAreRefused(t *testing.T) {
+	// Whichever one loses is invisible: it is in the register, reads as approved,
+	// and does nothing. The platform team would retire the wrong one and wonder
+	// why the build still passes — or extend the wrong expiry and be surprised
+	// when enforcement reverts early.
+	_, err := guardrail.LoadWaiverRegister(writeRegister(t, `apiVersion: guardrail.otel/v1
+kind: WaiverRegister
+waivers:
+  - service_name: legacy-inventory
+    standard: S1
+    reason: "The first one."
+    approved_by: obs-team
+    expires: 2027-04-01
+  - service_name: legacy-inventory
+    standard: S1
+    reason: "The second one, which silently does nothing."
+    approved_by: obs-team
+    expires: 2028-01-01
+`))
+
+	if err == nil {
+		t.Fatal("two Waivers for one service and Standard loaded; one of them silently does nothing")
+	}
+	if !strings.Contains(err.Error(), "legacy-inventory") || !strings.Contains(err.Error(), "S1") {
+		t.Errorf("the error does not name the service and Standard covered twice: %v", err)
+	}
+}
+
+// The register the org actually ships. These are invariants, not a snapshot:
+// ADR 0004 makes this file the source of truth, so filing a real Waiver or
+// retiring one must not break a test. Anything asserted here has to hold with
+// no Waivers in the register as readily as with fifty.
+func TestTheWaiverRegisterShippedWithTheCLIHoldsTogether(t *testing.T) {
 	register, err := guardrail.CentralWaiverRegister()
 
 	if err != nil {
 		t.Fatalf("the register shipped in the binary does not load: %v", err)
 	}
-	if len(register.Waivers()) == 0 {
-		t.Fatal("the shipped register holds no Waiver; the honoured and expired paths have no example")
+	for _, w := range register.Waivers() {
+		if w.Expires.IsZero() {
+			t.Errorf("Waiver for %s/%s has no expiry, so it would never lapse", w.ServiceName, w.Standard)
+		}
+		if w.ApprovedBy == "" {
+			t.Errorf("Waiver for %s/%s records no approver", w.ServiceName, w.Standard)
+		}
+		if w.Reason == "" {
+			t.Errorf("Waiver for %s/%s records no reason", w.ServiceName, w.Standard)
+		}
 	}
 }
 

@@ -34,6 +34,25 @@ graduations:
 	}
 }
 
+func TestAScheduleDeclaringAnApiVersionThisBinaryDoesNotUnderstandIsRefused(t *testing.T) {
+	// The schedule decides which services block today. Reading one written for a
+	// later schema under this binary's rules is the worst kind of confident wrong.
+	_, err := guardrail.LoadEnforcementSchedule(writeSchedule(t, `apiVersion: guardrail.otel/v99
+kind: EnforcementSchedule
+epoch: 2026-01-01
+graduations:
+  - standard: S1
+    graduates: 2027-01-01
+`))
+
+	if err == nil {
+		t.Fatal("an enforcement schedule declaring an unsupported apiVersion loaded")
+	}
+	if !strings.Contains(err.Error(), "guardrail.otel/v99") {
+		t.Errorf("the error does not name the version found: %v", err)
+	}
+}
+
 func TestAScheduleThatPublishesNoEpochIsRefused(t *testing.T) {
 	// The worst silent failure in the system. An absent or mistyped `epoch:` leaves
 	// a zero Date, every service then dates as on-or-after it, and every blocking

@@ -1,0 +1,35 @@
+# A Waiver register used for demonstration and testing ONLY.
+#
+# This is not the org's register — that is guardrail/waivers.yaml, which is
+# embedded in the binary and is the source of truth for real exemptions
+# (ADR 0004). The two files exist separately on purpose. Everything that needs
+# Waivers on fixed, known dates — the CI example steps, the CLI tests, the
+# waiver-expiry cron's own test — points here with `--waivers`, so the platform
+# team can file, extend or retire a real Waiver in the live register without a
+# test three directories away failing.
+#
+# The dates below are load-bearing for those tests. Change them and the tests
+# that assert the honoured/lapsed split will tell you exactly what they assumed.
+apiVersion: guardrail.otel/v1
+kind: WaiverRegister
+waivers:
+  # In force well past today: legacy-inventory violates S1 and the build still
+  # passes, with the violation and this expiry printed on every run.
+  - service_name: legacy-inventory
+    standard: S1
+    reason: >-
+      deployment.environment is stamped by the platform sidecar, not by the
+      service; the sidecar rollout for supply-chain lands 2027-03.
+    approved_by: obs-team
+    expires: 2027-04-01
+
+  # Already lapsed: legacy-payments-batch violates the same Standard and the
+  # build fails again. Nobody deleted this entry and nobody revoked anything —
+  # the expiry date simply passed.
+  - service_name: legacy-payments-batch
+    standard: S1
+    reason: >-
+      Batch runner read its environment from a decommissioned config service;
+      deferred until the migration to the platform sidecar completed.
+    approved_by: obs-team
+    expires: 2026-01-15
