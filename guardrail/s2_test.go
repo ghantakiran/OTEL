@@ -3,7 +3,11 @@
 // The check and reports helpers live in guardrail_test.go.
 package guardrail_test
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/ghantakiran/OTEL/guardrail"
+)
 
 func TestPreflightReportsATierOneContractMissingMetrics(t *testing.T) {
 	violations := check(t, "examples/tier-1-missing-signal-contract.yaml")
@@ -37,6 +41,16 @@ func TestPreflightReportsAContractDeclaringAServiceTierOutsideTheTaxonomy(t *tes
 	}
 }
 
+func TestS2BlocksTheBuild(t *testing.T) {
+	violations := check(t, "examples/tier-1-missing-signal-contract.yaml")
+
+	for _, v := range violations {
+		if v.Standard == "S2" && v.Severity != guardrail.SeverityBlock {
+			t.Fatalf("S2 declared Severity %q, want %q", v.Severity, guardrail.SeverityBlock)
+		}
+	}
+}
+
 // The taxonomy is graded: a lower Service Tier mandates strictly fewer Signals.
 
 func TestPreflightDoesNotDemandLogsOfATierTwoContract(t *testing.T) {
@@ -50,7 +64,12 @@ func TestPreflightDoesNotDemandLogsOfATierTwoContract(t *testing.T) {
 func TestPreflightPassesATierThreeContractDeclaringTracesAlone(t *testing.T) {
 	violations := check(t, "examples/tier-3-least-signals-contract.yaml")
 
-	if len(violations) != 0 {
-		t.Fatalf("tier-3 mandates traces alone, got %+v", violations)
+	// Scoped to S2 on purpose: this fixture pins the floor of the taxonomy, not
+	// compliance with the whole catalog. Other Standards are free to have their
+	// own opinion about it without making this test lie.
+	for _, v := range violations {
+		if v.Standard == "S2" {
+			t.Fatalf("tier-3 mandates traces alone, got %+v", violations)
+		}
 	}
 }

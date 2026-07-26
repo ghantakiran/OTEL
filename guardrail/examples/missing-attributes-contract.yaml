@@ -1,4 +1,6 @@
-# A Telemetry Contract that omits a required resource attribute (S1).
+# A Telemetry Contract that omits a required resource attribute (S1). It also
+# declares tier-3 without the traces Signal, so S2 flags it too — a real Contract
+# rarely fails exactly one Standard.
 # CI runs `otel-guardrail check` over this file and expects a non-zero exit code.
 apiVersion: guardrail.otel/v1
 kind: TelemetryContract
