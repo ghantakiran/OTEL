@@ -1,0 +1,12 @@
+# A Telemetry Contract that omits a required resource attribute (S1).
+# CI runs `otel-guardrail check` over this file and expects a non-zero exit code.
+apiVersion: guardrail.otel/v1
+kind: TelemetryContract
+service_name: legacy-reporting
+owner: team-analytics
+tier: tier-3
+signals:
+  - logs
+resource_attributes:
+  service.name: legacy-reporting
+  service.version: "0.9.0"
