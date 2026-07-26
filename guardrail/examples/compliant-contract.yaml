@@ -13,3 +13,5 @@ resource_attributes:
   service.name: checkout-api
   service.version: "2.4.1"
   deployment.environment: production
+  service.namespace: payments
+  service.instance.id: checkout-api-7d9f4b

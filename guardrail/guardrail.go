@@ -32,14 +32,89 @@ func StandardPolicies() fs.FS {
 	return catalog
 }
 
-// Violation is one Standard a Telemetry Contract fails to meet.
+// Severity is the enforcement weight of a Standard when it is violated.
+// Only SeverityBlock fails the build (ADR 0003).
+type Severity string
+
+const (
+	SeverityInfo  Severity = "info"
+	SeverityWarn  Severity = "warn"
+	SeverityBlock Severity = "block"
+)
+
+// rank orders severities from most to least severe, for reproducible output.
+func (s Severity) rank() int {
+	switch s {
+	case SeverityBlock:
+		return 0
+	case SeverityWarn:
+		return 1
+	default:
+		return 2
+	}
+}
+
+// validate rejects a Severity no Standard is allowed to emit. A Standard that
+// forgets to declare its Severity must not quietly stop blocking, so an absent
+// or unrecognised Severity is an error against the catalog — not a violation
+// charged to the service team.
+func (s Severity) validate(standard string) error {
+	switch s {
+	case SeverityInfo, SeverityWarn, SeverityBlock:
+		return nil
+	case "":
+		return fmt.Errorf("Standard %q declared no Severity: every Standard must declare one of %q, %q or %q",
+			standard, SeverityInfo, SeverityWarn, SeverityBlock)
+	default:
+		return fmt.Errorf("Standard %q declared unrecognised Severity %q: must be one of %q, %q or %q",
+			standard, s, SeverityInfo, SeverityWarn, SeverityBlock)
+	}
+}
+
+// Violation is one Standard a Telemetry Contract fails to meet, carrying the
+// Severity the Standard declared for it.
 type Violation struct {
-	Standard string `json:"standard"`
-	Message  string `json:"message"`
+	Standard string   `json:"standard"`
+	Severity Severity `json:"severity"`
+	Message  string   `json:"message"`
 }
 
 func (v Violation) String() string {
-	return fmt.Sprintf("%s: %s", v.Standard, v.Message)
+	return fmt.Sprintf("[%s] %s: %s", v.Severity, v.Standard, v.Message)
+}
+
+// Result is the outcome of running the Preflight Guardrail over one Telemetry
+// Contract. It owns the enforcement rule — only a block Severity fails a build
+// (ADR 0003) — so a caller never re-derives that rule from severities.
+type Result struct {
+	// Violations is every Standard the Contract failed, most severe first.
+	Violations []Violation
+}
+
+// FailsTheBuild reports whether any violated Standard is severe enough to stop
+// the pipeline. It is the only question CI has to ask.
+func (r Result) FailsTheBuild() bool {
+	return len(r.Blocking()) > 0
+}
+
+// Blocking is the violations that fail the build.
+func (r Result) Blocking() []Violation {
+	return r.violationsThatBlock(true)
+}
+
+// NonBlocking is the violations that are reported but let the build through.
+func (r Result) NonBlocking() []Violation {
+	return r.violationsThatBlock(false)
+}
+
+func (r Result) violationsThatBlock(blocking bool) []Violation {
+	var selected []Violation
+	for _, v := range r.Violations {
+		if (v.Severity == SeverityBlock) == blocking {
+			selected = append(selected, v)
+		}
+	}
+	return selected
 }
 
 // Preflight is the static Guardrail that runs before deploy.
@@ -75,38 +150,51 @@ func NewPreflight(catalog fs.FS) (*Preflight, error) {
 }
 
 // Check evaluates every Standard against a declared Telemetry Contract.
-// Violations come back in a stable order; an empty result means the Contract complies.
-func (p *Preflight) Check(ctx context.Context, c contract.Contract) ([]Violation, error) {
+// Violations come back in a stable order; a Result with no violations means the
+// Contract meets every Standard in the catalog.
+func (p *Preflight) Check(ctx context.Context, c contract.Contract) (Result, error) {
 	input, err := asDocument(c)
 	if err != nil {
-		return nil, err
+		return Result{}, err
 	}
 
 	results, err := p.standards.Eval(ctx, rego.EvalInput(input))
 	if err != nil {
-		return nil, fmt.Errorf("evaluate Standards: %w", err)
+		return Result{}, fmt.Errorf("evaluate Standards: %w", err)
 	}
 	if len(results) == 0 || len(results[0].Expressions) == 0 {
-		return nil, nil
+		return Result{}, nil
 	}
 
 	raw, err := json.Marshal(results[0].Expressions[0].Value)
 	if err != nil {
-		return nil, fmt.Errorf("read Standard results: %w", err)
+		return Result{}, fmt.Errorf("read Standard results: %w", err)
 	}
 	var violations []Violation
 	if err := json.Unmarshal(raw, &violations); err != nil {
-		return nil, fmt.Errorf("decode Standard results: %w", err)
+		return Result{}, fmt.Errorf("decode Standard results: %w", err)
+	}
+	// The catalog is trusted to say how severely it enforces; it is not trusted
+	// to remember to say it at all.
+	for _, v := range violations {
+		if err := v.Severity.validate(v.Standard); err != nil {
+			return Result{}, err
+		}
 	}
 
 	// Rego sets are unordered; CI output and exit codes must be reproducible.
+	// Most severe first, so the reason a build failed leads the output.
 	sort.Slice(violations, func(i, j int) bool {
-		if violations[i].Standard != violations[j].Standard {
-			return violations[i].Standard < violations[j].Standard
+		a, b := violations[i], violations[j]
+		if a.Severity != b.Severity {
+			return a.Severity.rank() < b.Severity.rank()
 		}
-		return violations[i].Message < violations[j].Message
+		if a.Standard != b.Standard {
+			return a.Standard < b.Standard
+		}
+		return a.Message < b.Message
 	})
-	return violations, nil
+	return Result{Violations: violations}, nil
 }
 
 // asDocument converts a Contract into the generic document Rego evaluates against.

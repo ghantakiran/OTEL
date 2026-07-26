@@ -12,6 +12,7 @@ violation contains v if {
 	not input.resource_attributes[attribute]
 	v := {
 		"standard": "S1",
+		"severity": "block",
 		"message": sprintf("required resource attribute %q is not declared", [attribute]),
 	}
 }
