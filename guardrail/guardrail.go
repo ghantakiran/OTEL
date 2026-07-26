@@ -325,8 +325,16 @@ func (p *Preflight) Check(ctx context.Context, c contract.Contract) (Result, err
 
 	// A Waiver is not a Standard, so it does not get a say in what the catalog
 	// found; it only downgrades how hard a finding lands, once the finding exists.
+	// Both a Waiver and the Enforcement Epoch answer the same question — how hard
+	// does this finding land — so both attach only where there is enforcement to
+	// modify. A warn Standard is already non-failing; recording a modifier against
+	// one would make the report name a Waiver that is holding nothing back, and
+	// point the reader at its expiry date instead of the date that matters.
 	asOf := p.now()
 	for i, v := range violations {
+		if v.Severity != SeverityBlock {
+			continue
+		}
 		if w, waived := p.waivers.InForce(c.ServiceName, v.Standard, asOf); waived {
 			violations[i].Waived = &w
 		}

@@ -34,6 +34,74 @@ graduations:
 	}
 }
 
+func TestAScheduleThatPublishesNoEpochIsRefused(t *testing.T) {
+	// The worst silent failure in the system. An absent or mistyped `epoch:` leaves
+	// a zero Date, every service then dates as on-or-after it, and every blocking
+	// Standard blocks the entire fleet at once — the political death ADR 0003
+	// exists to prevent, from one typo, with no error. The Waiver register refuses
+	// a Waiver with no expiry for exactly this reason; the schedule must match it.
+	_, err := guardrail.LoadEnforcementSchedule(writeSchedule(t, `apiVersion: guardrail.otel/v1
+kind: EnforcementSchedule
+epock: 2026-01-01
+graduations:
+  - standard: S1
+    graduates: 2027-01-01
+`))
+
+	if err == nil {
+		t.Fatal("a schedule with no Enforcement Epoch loaded: every service would classify as new")
+	}
+	if !strings.Contains(err.Error(), "epoch") {
+		t.Errorf("the error does not name the missing field: %v", err)
+	}
+}
+
+func TestAGraduationDeadlineThatIsNotADateIsRefused(t *testing.T) {
+	// A mistyped `graduates:` key leaves a zero Date, which reads as a deadline
+	// that has already arrived — so the Standard is published *and* blocks legacy
+	// services immediately. Its neighbour, a mistyped `standard:` key, fails loudly.
+	// One typo cannot fail loud while the one beside it fails silent.
+	_, err := guardrail.LoadEnforcementSchedule(writeSchedule(t, `apiVersion: guardrail.otel/v1
+kind: EnforcementSchedule
+epoch: 2026-01-01
+graduations:
+  - standard: S1
+    gradutes: 2027-01-01
+`))
+
+	if err == nil {
+		t.Fatal("a graduation with no deadline loaded: the Standard would block legacy services at once")
+	}
+	if !strings.Contains(err.Error(), "S1") {
+		t.Errorf("the error does not name the Standard at fault: %v", err)
+	}
+}
+
+func TestTheShippedEnforcementScheduleIsUsable(t *testing.T) {
+	// The schedule this binary actually ships. Nothing else in the suite loads it,
+	// so a typo committed to guardrail/enforcement.yaml would reach the fleet.
+	schedule, err := guardrail.CentralEnforcementSchedule()
+	if err != nil {
+		t.Fatalf("the shipped enforcement schedule does not load: %v", err)
+	}
+
+	if schedule.Epoch().IsZero() {
+		t.Error("the shipped schedule publishes no Enforcement Epoch, so every service classifies as new")
+	}
+	// Every Standard that can block needs a published deadline, or a legacy
+	// service violating it can be neither blocked nor deferred (ADR 0003).
+	for _, standard := range []string{"S1", "S2"} {
+		graduates, published := schedule.Graduation(standard)
+		if !published {
+			t.Errorf("blocking Standard %s has no published graduation deadline", standard)
+			continue
+		}
+		if graduates.IsZero() {
+			t.Errorf("blocking Standard %s graduates on the zero date, so it blocks legacy services at once", standard)
+		}
+	}
+}
+
 func TestAServiceWhoseContractFirstAppearedBeforeTheEpochIsLegacy(t *testing.T) {
 	schedule := scheduleFrom(t, epochOf("2026-01-01"))
 
@@ -194,6 +262,38 @@ func TestDeletingAndRedeclaringAContractDoesNotResetTheClock(t *testing.T) {
 	}
 	if got := appeared.Format("2006-01-02"); got != "2025-06-11" {
 		t.Errorf("re-declaring the Contract moved its first appearance to %q, want 2025-06-11", got)
+	}
+}
+
+func TestAShallowCloneCannotDateAContractAndSaysSo(t *testing.T) {
+	// The scenario the Epoch's safety net was written for, and the one it missed:
+	// a shallow clone grafts its tip as parentless, so git reports every file as
+	// added in that tip commit. The lookup then *succeeds* and returns today —
+	// classifying every legacy service as new and blocking the whole fleet, which
+	// is the political death ADR 0003 exists to prevent. Absence of history has
+	// to be detected, not inferred from a failed lookup.
+	origin := t.TempDir()
+	git(t, origin, "init")
+	git(t, origin, "config", "user.email", "guardrail@example.test")
+	git(t, origin, "config", "user.name", "Guardrail")
+
+	write(t, filepath.Join(origin, "telemetry-contract.yaml"), "service_name: legacy-inventory\n")
+	git(t, origin, "add", "telemetry-contract.yaml")
+	git(t, origin, "commit", "-m", "declare a Telemetry Contract", "--date", "2025-06-11T09:00:00+00:00")
+
+	write(t, filepath.Join(origin, "README.md"), "later\n")
+	git(t, origin, "add", "README.md")
+	git(t, origin, "commit", "-m", "something later", "--date", "2026-05-02T09:00:00+00:00")
+
+	shallow := filepath.Join(t.TempDir(), "shallow")
+	git(t, t.TempDir(), "clone", "--depth", "1", "file://"+origin, shallow)
+
+	_, err := guardrail.FirstAppearanceInGit(filepath.Join(shallow, "telemetry-contract.yaml"))()
+	if err == nil {
+		t.Fatal("a shallow clone dated the Contract instead of refusing: every legacy service would be classified new")
+	}
+	if !strings.Contains(err.Error(), "fetch-depth") {
+		t.Errorf("the error does not say how to fix it: %v", err)
 	}
 }
 

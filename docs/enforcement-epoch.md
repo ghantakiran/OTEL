@@ -44,6 +44,8 @@ The alternative, a `first_declared:` field in the Contract, was rejected: it han
 
 `actions/checkout` clones with `fetch-depth: 1` by default, which leaves no history to read. When the first-appearance day cannot be determined, `otel-guardrail check` **stops with exit 2** — "the Guardrail could not run" — and says how to fix it.
 
+A shallow clone is detected explicitly, with `git rev-parse --is-shallow-repository`, rather than inferred from a lookup that came back empty. It has to be: a shallow clone grafts its tip commit as parentless, so `git log --diff-filter=A` reports **every** file in it as added in that tip commit. The lookup therefore *succeeds* and returns today's date. Left to infer, the Guardrail would classify every legacy service as new and block the whole fleet — silently, and in exactly the scenario this check exists for.
+
 It does not guess, because both guesses are bad in opposite directions. Guessing *new* fails every legacy service the moment somebody shallow-clones. Guessing *legacy* hands every service a trivial escape from blocking. Neither is a decision a tool should make quietly on the platform team's behalf.
 
 Set `fetch-depth: 0` on your checkout — see [ci-action.md](./ci-action.md).

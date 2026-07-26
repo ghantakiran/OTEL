@@ -168,7 +168,10 @@ func TestCheckRefusesToJudgeAContractItCannotDate(t *testing.T) {
 	// guess blocks every legacy service the moment someone shallow-clones, the
 	// other hands every service a way out.
 	uncommitted := filepath.Join(t.TempDir(), "telemetry-contract.yaml")
-	if err := os.WriteFile(uncommitted, []byte("service_name: undated\ntier: tier-3\nsignals: [traces]\n"), 0o600); err != nil {
+	// A *valid* Contract, so what is under test is the refusal to date it and not
+	// the refusal to read it.
+	valid := "apiVersion: guardrail.otel/v1\nkind: TelemetryContract\nservice_name: undated\ntier: tier-3\nsignals: [traces]\n"
+	if err := os.WriteFile(uncommitted, []byte(valid), 0o600); err != nil {
 		t.Fatalf("write Contract: %v", err)
 	}
 

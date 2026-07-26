@@ -1,0 +1,11 @@
+# A well-formed YAML document that is not a Telemetry Contract. Pointed at
+# `otel-guardrail check` — by a mistyped path or a wrong `contract:` input in CI
+# — it must be refused, not decoded into a Contract with every field empty.
+apiVersion: guardrail.otel/v1
+kind: WaiverRegister
+waivers:
+  - service_name: legacy-inventory
+    standard: S1
+    reason: "Attribute is set by the platform sidecar, not the service."
+    approved_by: obs-team
+    expires: 2027-04-01
