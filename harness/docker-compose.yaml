@@ -1,0 +1,97 @@
+# The two-tier topology, standing up: a sample service emits OTLP to its Agent,
+# the Agent forwards to the Gateway, the Gateway exports to a Backend.
+#
+# The Agent's and the Gateway's configs are COMPILED — `otel-guardrail compile` and
+# `otel-guardrail gateway` write them into generated/ and they are mounted here
+# verbatim. A harness that proved a hand-written config works would prove nothing
+# about the compiler, which is the thing under test.
+#
+# Two things here are hand-written, deliberately:
+#
+#   backend-collector.yaml   The Backend stand-in. A real Backend (Splunk, a
+#                            metrics store) is not something this repo can run, so
+#                            a collector with a `debug` exporter takes its place —
+#                            it receives OTLP over the wire exactly as a Backend
+#                            would and prints what arrived. See docs/agent-gateway-
+#                            topology.md for what that does and does not prove.
+#   insecure/*.yaml          One overlay per collector, containing nothing but
+#                            `tls: insecure: true`. The compiled configs are
+#                            written for a cluster with certificates; this runs on
+#                            a docker bridge without any. The collector merges
+#                            repeated --config flags, so the compiled file is still
+#                            used byte for byte and the concession stays visible.
+#
+# The Kubernetes DNS names in the compiled configs are network aliases below, so
+# nothing has to be rewritten to make them resolve here.
+
+name: otel-platform-harness
+
+services:
+  # The Gateway: one shared collector, receiving from every Agent, exporting to a
+  # Backend. Its config is compiled from controlplane/gateway.yaml.
+  gateway:
+    image: otel/opentelemetry-collector:0.127.0
+    command:
+      - --config=/etc/otelcol/compiled.yaml
+      - --config=/etc/otelcol/insecure.yaml
+    volumes:
+      - ./generated/gateway.yaml:/etc/otelcol/compiled.yaml:ro
+      - ./insecure/gateway.yaml:/etc/otelcol/insecure.yaml:ro
+    networks:
+      otel:
+        aliases:
+          # The address every Pipeline Profile forwards Agents to.
+          - otel-gateway.observability.svc.cluster.local
+
+  # The Agent: one per service, running beside it. Its config is compiled from a
+  # Telemetry Contract and its Service Tier's Pipeline Profile.
+  agent:
+    image: otel/opentelemetry-collector:0.127.0
+    command:
+      - --config=/etc/otelcol/compiled.yaml
+      - --config=/etc/otelcol/insecure.yaml
+    volumes:
+      - ./generated/agent.yaml:/etc/otelcol/compiled.yaml:ro
+      - ./insecure/agent.yaml:/etc/otelcol/insecure.yaml:ro
+    networks:
+      - otel
+
+  # The Backend stand-in: receives OTLP from the Gateway and prints what arrived.
+  backend:
+    image: otel/opentelemetry-collector:0.127.0
+    command:
+      - --config=/etc/otelcol/backend.yaml
+    volumes:
+      - ./backend-collector.yaml:/etc/otelcol/backend.yaml:ro
+    networks:
+      otel:
+        aliases:
+          # The endpoint the Gateway Declaration names as its Backend.
+          - apm-otlp.observability.svc.cluster.local
+
+  # The sample service: emits one OTLP span to its Agent over HTTP, and — like
+  # every service on this platform — names no Backend and does not know the Gateway
+  # exists. Run on demand by run.sh, not by `up`.
+  sample-service:
+    image: curlimages/curl:8.11.1
+    profiles: [emit]
+    depends_on: [agent]
+    volumes:
+      - ./generated/span.json:/payload.json:ro
+    command:
+      - --silent
+      - --show-error
+      - --fail
+      - --request
+      - POST
+      - http://agent:4318/v1/traces
+      - --header
+      - "Content-Type: application/json"
+      - --data-binary
+      - "@/payload.json"
+    networks:
+      - otel
+
+networks:
+  otel:
+    driver: bridge

@@ -1,0 +1,11 @@
+# The whole of what the harness adds to the compiled Gateway config. See
+# insecure/agent.yaml — same concession, the Gateway-to-Backend hop this time.
+#
+# The exporter name here is derived from the Backend's name in
+# controlplane/gateway.yaml (`backend: primary-apm` compiles to `otlp/primary-apm`).
+# Renaming that Backend means renaming this too, and the harness fails loudly if
+# they disagree: the collector refuses a config naming an exporter no pipeline uses.
+exporters:
+  otlp/primary-apm:
+    tls:
+      insecure: true

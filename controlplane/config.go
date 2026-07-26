@@ -2,6 +2,7 @@ package controlplane
 
 import (
 	"fmt"
+	"net"
 	"sort"
 
 	"gopkg.in/yaml.v3"
@@ -9,8 +10,10 @@ import (
 	"github.com/ghantakiran/OTEL/contract"
 )
 
-// CollectorConfig is a compiled OpenTelemetry Collector configuration for one
-// service's Agent.
+// CollectorConfig is a compiled OpenTelemetry Collector configuration — for one
+// service's Agent, or for the shared Gateway. One intermediate model for both:
+// they are the same kind of artifact, and a second would mean two Validate
+// implementations disagreeing about what "coherent" means.
 //
 // It is a typed value rather than a string of YAML on purpose: the Control Plane
 // wants to ask questions of it before it ever reaches a file — does it collect
@@ -30,7 +33,7 @@ type CollectorService struct {
 	Pipelines map[string]Pipeline `yaml:"pipelines"`
 }
 
-// Pipeline is one signal's path through the Agent.
+// Pipeline is one Signal's path through a collector.
 type Pipeline struct {
 	Receivers  []string `yaml:"receivers"`
 	Processors []string `yaml:"processors"`
@@ -98,6 +101,95 @@ func assemble(c contract.Contract, profile Profile, signals []contract.Signal) C
 		}
 	}
 	return config
+}
+
+// assembleGateway builds the shared Gateway's config: receive OTLP from the
+// fleet's Agents, rebatch across all of them, export to a Backend.
+func assembleGateway(declaration GatewayDeclaration) CollectorConfig {
+	config := CollectorConfig{
+		Receivers: map[string]any{
+			otlpReceiver: map[string]any{
+				"protocols": map[string]any{
+					// Derived from the address Agents were told to forward to, so the two
+					// halves of the topology cannot be configured to disagree.
+					"grpc": map[string]any{"endpoint": listenOn(declaration.Address)},
+				},
+			},
+		},
+		Processors: map[string]any{
+			batchProcessor: map[string]any{
+				"timeout":         declaration.Batch.Timeout,
+				"send_batch_size": declaration.Batch.SendBatchSize,
+			},
+		},
+		Exporters: map[string]any{},
+		Service:   CollectorService{Pipelines: map[string]Pipeline{}},
+	}
+
+	// The Gateway absorbs the whole fleet's telemetry, so its ceiling matters more
+	// than any Agent's — and it goes first for the same reason: a limiter placed
+	// after batching caps memory batching has already been allowed to allocate.
+	processors := []string{batchProcessor}
+	if declaration.MemoryLimitMiB > 0 {
+		config.Processors[memoryLimiterProcessor] = map[string]any{
+			"limit_mib":      declaration.MemoryLimitMiB,
+			"check_interval": "1s",
+		}
+		processors = append([]string{memoryLimiterProcessor}, processors...)
+	}
+
+	exporters := make([]string, 0, len(declaration.Backends))
+	for _, backend := range declaration.Backends {
+		config.Exporters[backendExporter(backend)] = backendExport(backend)
+		exporters = append(exporters, backendExporter(backend))
+	}
+
+	// One pipeline per Signal, unconditionally. An Agent's pipelines are the Signals
+	// one Contract declares; the Gateway is shared by the whole fleet, so it must
+	// relay anything any Contract could declare.
+	for _, signal := range contract.Signals() {
+		config.Service.Pipelines[string(signal)] = Pipeline{
+			Receivers:  []string{otlpReceiver},
+			Processors: processors,
+			Exporters:  exporters,
+		}
+	}
+	return config
+}
+
+// backendExporter is the collector component ID for a Backend's exporter. Named
+// after the Backend so that a Gateway fanning out to several (C5, #13) reads as a
+// list of destinations rather than otlp/1, otlp/2.
+func backendExporter(backend Backend) string {
+	return otlpReceiver + "/" + backend.Name
+}
+
+// backendExport is the OTLP exporter aimed at one Backend, with that Backend's own
+// delivery durability. Same omission rule as the Agent's: a setting that would do
+// nothing is not emitted.
+func backendExport(backend Backend) map[string]any {
+	exporter := map[string]any{"endpoint": backend.Endpoint}
+
+	if backend.Delivery.QueueSize > 0 {
+		exporter["sending_queue"] = map[string]any{
+			"enabled":    true,
+			"queue_size": backend.Delivery.QueueSize,
+		}
+	}
+	if backend.Delivery.Retry {
+		exporter["retry_on_failure"] = map[string]any{"enabled": true}
+	}
+	return exporter
+}
+
+// listenOn is the receiver endpoint for an address Agents forward to: the same
+// port, on every interface.
+func listenOn(address string) string {
+	_, port, err := net.SplitHostPort(address)
+	if err != nil {
+		return ""
+	}
+	return "0.0.0.0:" + port
 }
 
 // gatewayExport is the OTLP exporter aimed at the Gateway, with the durability

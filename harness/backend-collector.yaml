@@ -1,0 +1,33 @@
+# The Backend stand-in. HAND-WRITTEN, and the only hand-written collector config
+# in the harness — the Agent's and the Gateway's are compiled.
+#
+# A Backend is a destination system (Splunk, a metrics store, a cold archive), and
+# this repo cannot run one. What it can do is stand something at the far end of the
+# Gateway's OTLP exporter that accepts the same protocol a Backend accepts and
+# shows what arrived. That is what this is: it proves telemetry crossed the wire
+# out of the Gateway, and nothing about how any particular vendor would ingest it.
+#
+# `debug` is a core-distribution exporter, like every other component the harness
+# uses. The `file` exporter would be tidier to assert against and lives in contrib,
+# which C1 and C2 deliberately kept out.
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+
+exporters:
+  debug:
+    verbosity: detailed
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      exporters: [debug]
+    metrics:
+      receivers: [otlp]
+      exporters: [debug]
+    logs:
+      receivers: [otlp]
+      exporters: [debug]

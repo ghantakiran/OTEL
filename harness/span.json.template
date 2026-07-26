@@ -1,0 +1,30 @@
+{
+  "resourceSpans": [
+    {
+      "resource": {
+        "attributes": [
+          {
+            "key": "service.name",
+            "value": { "stringValue": "harness-sample-service" }
+          }
+        ]
+      },
+      "scopeSpans": [
+        {
+          "scope": { "name": "otel-platform-harness" },
+          "spans": [
+            {
+              "traceId": "__TRACE_ID__",
+              "spanId": "__SPAN_ID__",
+              "name": "__SPAN_NAME__",
+              "kind": 2,
+              "startTimeUnixNano": "__START_NANOS__",
+              "endTimeUnixNano": "__END_NANOS__",
+              "status": {}
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

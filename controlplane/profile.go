@@ -3,6 +3,9 @@
 // Tier's Pipeline Profile (how that telemetry ships) into a collector config,
 // and reads the Service Tier Taxonomy the Guardrails already enforce rather than
 // re-encoding it (ADR 0005, ADR 0007).
+//
+// It compiles the other half of the topology too: the shared Gateway that every
+// Agent forwards to, from the org's Gateway Declaration (ADR 0013).
 package controlplane
 
 import (
@@ -37,13 +40,17 @@ type Profile struct {
 	Sampling        Sampling `yaml:"sampling"`
 }
 
-// Delivery is how hard the Agent tries to get telemetry to the Gateway when the
-// Gateway is not answering. Retrying protects telemetry the org cannot lose; not
-// retrying protects the service from an Agent applying back-pressure over
-// telemetry nobody will read. Which of those matters is a criticality decision,
-// so it lives per Profile.
+// Delivery is how hard one collector tries to get telemetry to the next hop when
+// the next hop is not answering. Retrying protects telemetry the org cannot lose;
+// not retrying protects the sender from applying back-pressure over telemetry
+// nobody will read.
+//
+// A Profile sets it for the Agent-to-Gateway hop, where which matters is a
+// criticality decision and so belongs per Service Tier. A Backend sets it for the
+// Gateway-to-Backend hop, where it belongs per Backend so that one slow
+// destination cannot block the others (ADR 0010).
 type Delivery struct {
-	// QueueSize is how many batches the Agent holds before dropping.
+	// QueueSize is how many batches the sender holds before dropping.
 	QueueSize int `yaml:"queue_size"`
 	// Retry is whether a failed export is retried.
 	Retry bool `yaml:"retry"`
@@ -56,7 +63,9 @@ type Batch struct {
 }
 
 // Sampling is the GATEWAY's tail-sampling budget for this tier — a per-tier cost
-// decision the Profile owns, consumed when the Gateway config compiles (C5, #13).
+// decision the Profile owns, consumed when tail sampling lands (C5, #13). It stays
+// here rather than in the Gateway Declaration precisely because it varies by tier,
+// which is the line ADR 0013 draws between the two documents.
 //
 // It is deliberately not head sampling at the Agent: the Gateway tail-samples
 // with the whole trace in hand (ADR 0007), and an Agent dropping spans first
