@@ -15,6 +15,9 @@ jobs:
           go-version-file: go.mod
       - run: go vet ./...
       - run: go test ./...
+      # The Waiver-expiry cron's open/update/close branching is bash, so `go
+      # test` cannot reach it. Stubs `gh`; creates no issues and needs no auth.
+      - run: bash .github/scripts/waiver-expiry-issue_test.sh
 
   guardrail-examples:
     name: Preflight Guardrail blocks what it should
