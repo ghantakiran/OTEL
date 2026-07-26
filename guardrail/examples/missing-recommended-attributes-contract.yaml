@@ -1,0 +1,17 @@
+# A Telemetry Contract that meets every blocking Standard but omits the
+# recommended resource attributes (S3, Severity warn).
+# CI runs `otel-guardrail check` over this file and expects exit code 0 with the
+# warn violations reported: a non-blocking Standard is visible, not fatal.
+apiVersion: guardrail.otel/v1
+kind: TelemetryContract
+service_name: pricing-api
+owner: team-pricing
+tier: tier-1
+signals:
+  - traces
+  - metrics
+  - logs
+resource_attributes:
+  service.name: pricing-api
+  service.version: "1.7.0"
+  deployment.environment: production

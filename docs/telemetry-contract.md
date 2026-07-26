@@ -18,6 +18,8 @@ resource_attributes:
   service.name: checkout-api
   service.version: "2.4.1"
   deployment.environment: production
+  service.namespace: payments
+  service.instance.id: checkout-api-7d9f4b
 ```
 
 | Field | Type | Meaning |
@@ -48,4 +50,17 @@ input.resource_attributes["deployment.environment"]
 otel-guardrail check path/to/telemetry-contract.yaml
 ```
 
-Exit codes: `0` compliant, `1` a Standard was violated, `2` the Guardrail could not run.
+Every violated Standard is reported with its **Severity**, blocking ones first:
+
+```
+legacy-reporting: 1 blocking Standard violation(s), 2 non-blocking
+  [block] S1: required resource attribute "deployment.environment" is not declared
+  [warn] S3: recommended resource attribute "service.instance.id" is not declared
+  [warn] S3: recommended resource attribute "service.namespace" is not declared
+```
+
+Only a `block` Severity fails the build (ADR 0003); `warn` and `info` violations are reported and the command still exits 0, so a Standard can roll out before it bites.
+
+Exit codes: `0` no blocking Standard was violated, `1` a blocking Standard was violated, `2` the Guardrail could not run.
+
+To author or read the Standards themselves, see [standards.md](./standards.md).
