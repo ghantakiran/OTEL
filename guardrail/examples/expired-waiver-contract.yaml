@@ -1,0 +1,17 @@
+# The same S1 violation as waived-contract.yaml, for a service whose Waiver in
+# guardrail/waivers.yaml expired on 2026-01-15. Nobody revoked the Waiver and
+# nobody edited the register: the expiry date passed, so enforcement reverted on
+# its own and S1 blocks again.
+# `otel-guardrail check` over this file exits 1.
+apiVersion: guardrail.otel/v1
+kind: TelemetryContract
+service_name: legacy-payments-batch
+owner: team-payments
+tier: tier-3
+signals:
+  - traces
+resource_attributes:
+  service.name: legacy-payments-batch
+  service.version: "3.0.7"
+  service.namespace: payments
+  service.instance.id: legacy-payments-batch-04

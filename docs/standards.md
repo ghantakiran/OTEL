@@ -55,12 +55,20 @@ A Standard declares its Severity on each violation it emits, so a single Standar
 | S1 | `block` | The required resource attributes: `service.name`, `service.version`, `deployment.environment`. |
 | S3 | `warn` | The recommended resource attributes: `service.namespace`, `service.instance.id`. Not needed to ship; they tell same-named services and individual replicas apart during triage. |
 
+## When a service cannot meet a Standard yet
+
+A **Waiver** lets one service skip one Standard until an expiry date, downgrading its effective enforcement from `block` to non-failing. It does not silence the Standard: the violation is still reported, with the approver and the expiry date, and the Standard blocks again by itself once the date passes.
+
+Waivers are not authored in Rego — a Waiver is not a Standard, it says nothing about what a service must emit. They live in one central register, `guardrail/waivers.yaml`, and are approved by the platform team. See [waivers.md](./waivers.md).
+
 ## Trying a Standard out
 
 ```
 otel-guardrail check guardrail/examples/compliant-contract.yaml                        # exit 0, no violations
 otel-guardrail check guardrail/examples/missing-recommended-attributes-contract.yaml   # exit 0, warn violations reported
 otel-guardrail check guardrail/examples/missing-attributes-contract.yaml               # exit 1, a blocking Standard was violated
+otel-guardrail check --as-of 2026-08-01 guardrail/examples/waived-contract.yaml        # exit 0, S1 reported but held back by a Waiver
+otel-guardrail check guardrail/examples/expired-waiver-contract.yaml                   # exit 1, the Waiver expired and S1 blocks again
 ```
 
 Exit codes: `0` no blocking Standard was violated, `1` a blocking Standard was violated, `2` the Guardrail could not run.

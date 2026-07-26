@@ -14,6 +14,7 @@ import (
 	"io/fs"
 	"path"
 	"sort"
+	"time"
 
 	"github.com/open-policy-agent/opa/v1/rego"
 
@@ -77,10 +78,25 @@ type Violation struct {
 	Standard string   `json:"standard"`
 	Severity Severity `json:"severity"`
 	Message  string   `json:"message"`
+	// Waived is the Waiver holding this violation back, when one is in force for
+	// this service and this Standard. A waived violation is still reported — a
+	// Waiver that hides its violation is how a Waiver becomes invisible and
+	// permanent — it simply stops failing the build until the Waiver expires.
+	Waived *Waiver `json:"waived,omitempty"`
 }
 
 func (v Violation) String() string {
+	if v.Waived != nil {
+		return fmt.Sprintf("[%s, waived by %s until %s] %s: %s",
+			v.Severity, v.Waived.ApprovedBy, v.Waived.Expires, v.Standard, v.Message)
+	}
 	return fmt.Sprintf("[%s] %s: %s", v.Severity, v.Standard, v.Message)
+}
+
+// failsTheBuild is the effective enforcement of one violation: a block Severity
+// stops the pipeline unless an unexpired Waiver holds it back.
+func (v Violation) failsTheBuild() bool {
+	return v.Severity == SeverityBlock && v.Waived == nil
 }
 
 // Result is the outcome of running the Preflight Guardrail over one Telemetry
@@ -107,10 +123,23 @@ func (r Result) NonBlocking() []Violation {
 	return r.violationsThatBlock(false)
 }
 
+// Waived is the violations an unexpired Waiver is holding back. They are
+// reported like any other; they just do not fail the build until the Waiver
+// expires, at which point enforcement reverts on its own.
+func (r Result) Waived() []Violation {
+	var selected []Violation
+	for _, v := range r.Violations {
+		if v.Waived != nil {
+			selected = append(selected, v)
+		}
+	}
+	return selected
+}
+
 func (r Result) violationsThatBlock(blocking bool) []Violation {
 	var selected []Violation
 	for _, v := range r.Violations {
-		if (v.Severity == SeverityBlock) == blocking {
+		if v.failsTheBuild() == blocking {
 			selected = append(selected, v)
 		}
 	}
@@ -120,12 +149,34 @@ func (r Result) violationsThatBlock(blocking bool) []Violation {
 // Preflight is the static Guardrail that runs before deploy.
 type Preflight struct {
 	standards rego.PreparedEvalQuery
+	waivers   *WaiverRegister
+	now       Clock
+}
+
+// Clock reports the day a Waiver's expiry is judged against. It is the seam
+// that keeps expiry testable: production passes time.Now, a test passes a
+// function returning a fixed day, and neither touches a global clock.
+type Clock func() time.Time
+
+// Option adjusts a Preflight Guardrail at construction.
+type Option func(*Preflight)
+
+// WithWaivers gives the Guardrail the org's Waiver register, so an unexpired
+// Waiver can downgrade a service's blocking violation to non-failing. Without
+// it every Standard enforces at its declared Severity.
+func WithWaivers(register *WaiverRegister) Option {
+	return func(p *Preflight) { p.waivers = register }
+}
+
+// WithClock fixes the day Waiver expiry is judged on. The default is time.Now.
+func WithClock(now Clock) Option {
+	return func(p *Preflight) { p.now = now }
 }
 
 // NewPreflight compiles a Standard catalog into a Preflight Guardrail. The
 // catalog is a filesystem of .rego files; use StandardPolicies for the built-in one.
-func NewPreflight(catalog fs.FS) (*Preflight, error) {
-	options := []func(*rego.Rego){rego.Query("data.otel.guardrail.violations")}
+func NewPreflight(catalog fs.FS, options ...Option) (*Preflight, error) {
+	regoOptions := []func(*rego.Rego){rego.Query("data.otel.guardrail.violations")}
 
 	err := fs.WalkDir(catalog, ".", func(name string, entry fs.DirEntry, err error) error {
 		if err != nil || entry.IsDir() || path.Ext(name) != ".rego" {
@@ -135,18 +186,26 @@ func NewPreflight(catalog fs.FS) (*Preflight, error) {
 		if err != nil {
 			return err
 		}
-		options = append(options, rego.Module(name, string(source)))
+		regoOptions = append(regoOptions, rego.Module(name, string(source)))
 		return nil
 	})
 	if err != nil {
 		return nil, fmt.Errorf("read Standard catalog: %w", err)
 	}
 
-	standards, err := rego.New(options...).PrepareForEval(context.Background())
+	standards, err := rego.New(regoOptions...).PrepareForEval(context.Background())
 	if err != nil {
 		return nil, fmt.Errorf("compile Standard catalog: %w", err)
 	}
-	return &Preflight{standards: standards}, nil
+
+	preflight := &Preflight{standards: standards}
+	for _, option := range options {
+		option(preflight)
+	}
+	if preflight.now == nil {
+		preflight.now = time.Now
+	}
+	return preflight, nil
 }
 
 // Check evaluates every Standard against a declared Telemetry Contract.
@@ -179,6 +238,15 @@ func (p *Preflight) Check(ctx context.Context, c contract.Contract) (Result, err
 	for _, v := range violations {
 		if err := v.Severity.validate(v.Standard); err != nil {
 			return Result{}, err
+		}
+	}
+
+	// A Waiver is not a Standard, so it does not get a say in what the catalog
+	// found; it only downgrades how hard a finding lands, once the finding exists.
+	asOf := p.now()
+	for i, v := range violations {
+		if w, waived := p.waivers.InForce(c.ServiceName, v.Standard, asOf); waived {
+			violations[i].Waived = &w
 		}
 	}
 
