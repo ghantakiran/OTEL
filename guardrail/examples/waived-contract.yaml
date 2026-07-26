@@ -1,0 +1,17 @@
+# A Telemetry Contract that violates S1 — deployment.environment is not
+# declared — but whose service holds an unexpired Waiver for S1 in
+# guardrail/waivers.yaml. The violation is still reported, with the Waiver's
+# approver and expiry date; the build passes.
+# `otel-guardrail check --as-of 2026-08-01` over this file exits 0.
+apiVersion: guardrail.otel/v1
+kind: TelemetryContract
+service_name: legacy-inventory
+owner: team-supply-chain
+tier: tier-3
+signals:
+  - traces
+resource_attributes:
+  service.name: legacy-inventory
+  service.version: "1.4.2"
+  service.namespace: supply-chain
+  service.instance.id: legacy-inventory-6b2c1a

@@ -35,3 +35,13 @@ jobs:
             echo "::error::violating Telemetry Contract exited 0 — the Guardrail is not blocking"
             exit 1
           fi
+
+      - name: A Waiver in force holds its Standard back
+        run: ./otel-guardrail check --as-of 2026-08-01 guardrail/examples/waived-contract.yaml
+
+      - name: An expired Waiver holds nothing back
+        run: |
+          if ./otel-guardrail check guardrail/examples/expired-waiver-contract.yaml; then
+            echo "::error::an expired Waiver still held a blocking Standard back"
+            exit 1
+          fi

@@ -33,7 +33,7 @@ Make that job a required check on your default branch and a violated Standard ca
 | Guardrail exit code | Step | What you should do |
 | --- | --- | --- |
 | `0` | passes | Nothing. Your Contract violates no blocking Standard. Non-blocking (`info` / `warn`) findings, if any, are printed in the step summary. |
-| `1` | **fails** | Your Telemetry Contract violates a Standard. Fix the Contract, or file a **Waiver** if the Standard genuinely cannot be met yet. The violations appear as an annotation on the Contract file and in the job summary. |
+| `1` | **fails** | Your Telemetry Contract violates a Standard. Fix the Contract, or file a **Waiver** ([waivers.md](./waivers.md)) if the Standard genuinely cannot be met yet. The violations appear as an annotation on the Contract file and in the job summary. |
 | `2` (or anything other than `0` / `1`) | **fails** | The Guardrail itself could not run — bad ref, unreachable repo, missing Contract file, broken policy load, binary that never got built. **This is not a finding about your Contract**; your Contract has not been judged. Escalate to the platform team rather than editing your Contract. |
 
 The action branches purely on the exit code and echoes the Guardrail's output verbatim. When the **Severity** model lands, `info` and `warn` violations will print but exit `0`; only `block` exits `1`. The action needs no change for that.

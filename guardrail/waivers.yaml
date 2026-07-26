@@ -1,0 +1,38 @@
+# The org's Waiver register.
+#
+# A Waiver is a time-boxed, owner-approved exemption letting ONE service skip
+# ONE Standard until an expiry date. Until then the Standard is still reported
+# for that service, it just stops failing the build; on the day after `expires`
+# enforcement reverts on its own, with nobody taking an action.
+#
+# Waivers live here, in the platform team's repository, and never in a service
+# repository: a service must not be able to waive itself. Adding one is a pull
+# request the platform team approves. See docs/waivers.md.
+#
+# `reason`, `approved_by` and `expires` are all required. A Waiver missing any
+# of them is rejected — `otel-guardrail check` exits 2, "the Guardrail could not
+# run" — because an unexplained, unapproved or unbounded Waiver is exactly the
+# permanent hole ADR 0003 warns about.
+apiVersion: guardrail.otel/v1
+kind: WaiverRegister
+waivers:
+  # Honoured today: legacy-inventory violates S1 and the build still passes,
+  # with the violation and this expiry date printed on every run.
+  - service_name: legacy-inventory
+    standard: S1
+    reason: >-
+      deployment.environment is stamped by the platform sidecar, not by the
+      service; the sidecar rollout for supply-chain lands 2027-03.
+    approved_by: obs-team
+    expires: 2027-04-01
+
+  # Already lapsed: legacy-payments-batch violates the same Standard and the
+  # build fails again. Nobody deleted this entry and nobody revoked anything —
+  # the expiry date simply passed.
+  - service_name: legacy-payments-batch
+    standard: S1
+    reason: >-
+      Batch runner read its environment from a decommissioned config service;
+      deferred until the migration to the platform sidecar completed.
+    approved_by: obs-team
+    expires: 2026-01-15
