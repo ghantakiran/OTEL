@@ -147,50 +147,40 @@ func runCheck(args []string, stdout, stderr io.Writer) int {
 	return exitOK
 }
 
-// summarize is the one-line headline above the violations. It is built from the
-// parts rather than enumerated case by case, because the parts multiply: a
-// finding can be blocking, held back by a Waiver, held back by a graduation
-// deadline, or merely advisory, and several can be true of one report.
+// summarize is the one-line headline above the violations. Every count and every
+// name in it comes from the Result's effective enforcement, so the summary cannot
+// disagree with the per-violation lines below it or with the exit code.
 func summarize(result guardrail.Result) string {
 	if len(result.Violations) == 0 {
 		return "Telemetry Contract meets all Standards"
 	}
 
-	blocking, heldBack, advisory := len(result.Blocking()), len(result.HeldBack()), len(result.Advisory())
+	failing := len(result.With(guardrail.EnforcementFailsBuild))
+	heldBack := len(result.With(guardrail.EnforcementHeldBack))
+	advisory := len(result.With(guardrail.EnforcementAdvisory))
 
 	var parts []string
-	if blocking > 0 {
-		parts = append(parts, fmt.Sprintf("%s failing the build", count(blocking, "blocking Standard violation")))
+	if failing > 0 {
+		parts = append(parts, fmt.Sprintf("%s failing the build", count(failing, "blocking Standard violation")))
 	}
 	if heldBack > 0 {
-		// Named, not buried in a total, and said with what is holding them: each
-		// of these breaks the build on a known day with nobody deciding anything
-		// further, and the reader needs to know which clock to watch.
+		// Named, not buried in a total, and said with what is holding them: each of
+		// these breaks the build on a known day with nobody deciding anything
+		// further, and the reader needs to know which clock to watch. Describe reads
+		// the held-back violations only, so it cannot name a Hold on a finding that
+		// was never going to fail the build.
 		parts = append(parts, fmt.Sprintf("%s held back by %s",
-			count(heldBack, "blocking Standard violation"), strings.Join(holders(result), " and ")))
+			count(heldBack, "blocking Standard violation"), result.Describe()))
 	}
 	if advisory > 0 {
 		parts = append(parts, count(advisory, "non-blocking finding")+" to address")
 	}
 
 	headline := strings.Join(parts, ", ")
-	if blocking > 0 {
+	if failing > 0 {
 		return headline
 	}
 	return "nothing fails the build — " + headline
-}
-
-// holders names what is keeping blocking violations from failing the build.
-// Both can be at work in one report and they lapse on different days.
-func holders(result guardrail.Result) []string {
-	var named []string
-	if len(result.Waived()) > 0 {
-		named = append(named, "a Waiver")
-	}
-	if len(result.Deferred()) > 0 {
-		named = append(named, "the Enforcement Epoch")
-	}
-	return named
 }
 
 func count(n int, noun string) string {

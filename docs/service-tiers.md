@@ -34,6 +34,19 @@ An empty or absent `tier` is treated the same way, for the same reason.
 
 Every S2 violation carries severity `block`. A service emitting less than its criticality demands cannot be operated during an incident, and phasing that in per-service is the job of the Enforcement Epoch and Waivers (ADR 0003), not of the Standard's own severity.
 
+## Where the taxonomy lives
+
+**One file: `guardrail/tiers.yaml`.** It is the source of truth for both consumers.
+
+- Go reads it — `guardrail.CentralTaxonomy()`, then `Tiers()` and `MandatorySignals(tier)`.
+- The **S2** policy reads it as the Rego data document `data.otel.taxonomy`. It does **not** declare tiers, and a test fails if any `.rego` file names one.
+
+That split is why it moved out of policy. A tier literal inside S2 was correct while policy was the only consumer, but the Control Plane keys **Pipeline Profiles** off these same identifiers (ADR 0005) — so the taxonomy would have existed twice, in two languages, drifting independently. And drifting silently: a Contract declaring a tier the Guardrail knows but the Control Plane does not would pass Preflight and then compile to the wrong pipeline.
+
+Input is the Contract under test; data is what the org has decided. The taxonomy is the second kind.
+
 ## Adding or changing a tier
 
-The taxonomy is fixed in the S2 policy, not per-service configuration. Changing it means editing `mandatory_signals` in the S2 policy and this document together, and expecting existing Contracts to fail until they catch up. That friction is intentional: the tier list is org-wide vocabulary (see [CONTEXT.md](../CONTEXT.md)), and the Control Plane later keys **Pipeline Profiles** off the same three identifiers.
+Edit `guardrail/tiers.yaml` and this document together. Nothing else needs to change — no policy edit, no code generation step — and existing Contracts should be expected to fail until they catch up. That friction is intentional: the tier list is org-wide vocabulary (see [CONTEXT.md](../CONTEXT.md)).
+
+`--taxonomy` is not a CLI flag: unlike the Waiver register and the enforcement schedule, the taxonomy is not optional, and a Guardrail without one would treat every declared tier as unknown and block the whole fleet. Tests supply one directly via `guardrail.WithTaxonomy`.
