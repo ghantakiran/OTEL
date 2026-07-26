@@ -51,16 +51,35 @@ func TestCompileMarksItsOutputAsGenerated(t *testing.T) {
 	}
 }
 
+func TestCompileWorksForEveryServiceTier(t *testing.T) {
+	// Every tier the org ships has a default Pipeline Profile (C2), so `compile`
+	// behaves uniformly across tiers rather than working only for tier-1.
+	for _, sample := range []string{
+		"../examples/compliant-contract.yaml",            // tier-1
+		"../examples/tier-3-least-signals-contract.yaml", // tier-3
+	} {
+		code, out, errOut := run(t, "compile", sample)
+
+		if code != 0 {
+			t.Errorf("%s did not compile: exit %d\n%s%s", sample, code, out, errOut)
+		}
+		if !strings.Contains(out, "service:") || !strings.Contains(out, "pipelines:") {
+			t.Errorf("%s produced no collector pipelines:\n%s", sample, out)
+		}
+	}
+}
+
 func TestCompileBlamesTheContractWhenItCannotBeCompiled(t *testing.T) {
-	// tier-3 has no Pipeline Profile yet. Exit 1, not 2: the exit-code split that
-	// `check` established — 1 is a finding about this input, 2 is the tool failing.
-	code, out, errOut := run(t, "compile", "../examples/tier-3-least-signals-contract.yaml")
+	// A tier outside the Service Tier Taxonomy: there is no telemetry floor to
+	// compile against. Exit 1, not 2 — the split `check` established: 1 is a
+	// finding about this input, 2 is the tool failing.
+	code, out, errOut := run(t, "compile", "../examples/unknown-tier-contract.yaml")
 
 	if code != 1 {
 		t.Fatalf("exit code = %d, want 1 for a Contract that cannot be compiled\n%s%s", code, out, errOut)
 	}
-	if !strings.Contains(errOut, "tier-3") {
-		t.Errorf("stderr does not say which tier could not be compiled:\n%s", errOut)
+	if !strings.Contains(errOut, "Taxonomy") {
+		t.Errorf("stderr does not say why it could not be compiled:\n%s", errOut)
 	}
 }
 

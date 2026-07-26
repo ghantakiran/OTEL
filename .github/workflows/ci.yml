@@ -61,10 +61,13 @@ jobs:
       - name: A tier-1 Contract compiles to collector config
         run: ./otel-guardrail compile guardrail/examples/compliant-contract.yaml
 
-      - name: A tier with no Pipeline Profile does not compile
+      - name: A tier-3 Contract compiles too — every tier has a Profile
+        run: ./otel-guardrail compile guardrail/examples/tier-3-least-signals-contract.yaml
+
+      - name: A Contract outside the Service Tier Taxonomy does not compile
         run: |
-          if ./otel-guardrail compile guardrail/examples/tier-3-least-signals-contract.yaml; then
-            echo "::error::a Service Tier with no Pipeline Profile compiled anyway"
+          if ./otel-guardrail compile guardrail/examples/unknown-tier-contract.yaml; then
+            echo "::error::a Contract declaring an unknown Service Tier compiled anyway"
             exit 1
           fi
 

@@ -31,8 +31,22 @@ type Profile struct {
 	Tiers           []string `yaml:"tiers"`
 	Description     string   `yaml:"description"`
 	GatewayEndpoint string   `yaml:"gateway_endpoint"`
+	MemoryLimitMiB  int      `yaml:"memory_limit_mib"`
 	Batch           Batch    `yaml:"batch"`
+	Delivery        Delivery `yaml:"delivery"`
 	Sampling        Sampling `yaml:"sampling"`
+}
+
+// Delivery is how hard the Agent tries to get telemetry to the Gateway when the
+// Gateway is not answering. Retrying protects telemetry the org cannot lose; not
+// retrying protects the service from an Agent applying back-pressure over
+// telemetry nobody will read. Which of those matters is a criticality decision,
+// so it lives per Profile.
+type Delivery struct {
+	// QueueSize is how many batches the Agent holds before dropping.
+	QueueSize int `yaml:"queue_size"`
+	// Retry is whether a failed export is retried.
+	Retry bool `yaml:"retry"`
 }
 
 // Batch is how telemetry is grouped before it leaves the Agent.
@@ -41,9 +55,12 @@ type Batch struct {
 	SendBatchSize int    `yaml:"send_batch_size"`
 }
 
-// Sampling is what the Agent drops before forwarding. The Gateway tail-samples
-// with the whole trace in hand, so an Agent sampling below 100% is a deliberate
-// cost decision recorded in the Profile, never a per-service choice.
+// Sampling is the GATEWAY's tail-sampling budget for this tier — a per-tier cost
+// decision the Profile owns, consumed when the Gateway config compiles (C5, #13).
+//
+// It is deliberately not head sampling at the Agent: the Gateway tail-samples
+// with the whole trace in hand (ADR 0007), and an Agent dropping spans first
+// would hand it broken traces. Nothing in an Agent config is derived from this.
 type Sampling struct {
 	TracesPercent int `yaml:"traces_percent"`
 }
