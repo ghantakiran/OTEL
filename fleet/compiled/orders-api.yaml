@@ -16,6 +16,9 @@ processors:
     batch:
         send_batch_size: 8192
         timeout: 5s
+    memory_limiter:
+        check_interval: 1s
+        limit_mib: 512
     resource:
         attributes:
             - action: upsert
@@ -36,12 +39,18 @@ processors:
 exporters:
     otlp/gateway:
         endpoint: otel-gateway.observability.svc.cluster.local:4317
+        retry_on_failure:
+            enabled: true
+        sending_queue:
+            enabled: true
+            queue_size: 10000
 service:
     pipelines:
         logs:
             receivers:
                 - otlp
             processors:
+                - memory_limiter
                 - resource
                 - batch
             exporters:
@@ -50,6 +59,7 @@ service:
             receivers:
                 - otlp
             processors:
+                - memory_limiter
                 - resource
                 - batch
             exporters:
@@ -58,6 +68,7 @@ service:
             receivers:
                 - otlp
             processors:
+                - memory_limiter
                 - resource
                 - batch
             exporters:

@@ -66,13 +66,27 @@ expect "hands the report path to the next step" 'grep -q "^REPORT=$report$" "$en
 
 echo
 echo "# A Fleet where one Telemetry Contract does not compile"
-# The whole sample fleet: reporting-worker is tier-2, which has no Profile yet.
-run_step "$work/fleet"
+# The broken Contract is written HERE rather than borrowed from the sample fleet.
+# Depending on the fleet to contain one would freeze it: the day that service's
+# tier gained a Pipeline Profile, this case would quietly stop testing anything —
+# which is exactly what happened once already.
+cp -R "$work/fleet" "$work/partly-broken"
+cat >"$work/partly-broken/contracts/invented-tier.yaml" <<'CONTRACT'
+apiVersion: guardrail.otel/v1
+kind: TelemetryContract
+service_name: invented-tier
+owner: team-x
+tier: tier-invented
+signals: [traces]
+resource_attributes:
+  service.name: invented-tier
+CONTRACT
+run_step "$work/partly-broken"
 expect "still succeeds, so the rest of the fleet still rolls out" '[ "$code" = "0" ]'
-expect "the report names the service that did not compile" 'grep -q "reporting-worker" "$report"'
+expect "the report names the service that did not compile" 'grep -q "invented-tier" "$report"'
 expect "the report still names the ones that did" '[ "$(jq ".compiled | length" "$report")" -ge 1 ]'
 expect "says so on the run itself, rather than passing silently" 'grep -q "::warning" <<<"$output"'
-expect "the warning says which service and why" 'grep -q "reporting-worker" <<<"$output" && grep -q "Pipeline Profile" <<<"$output"'
+expect "the warning says which service and why" 'grep -q "invented-tier" <<<"$output" && grep -q "Taxonomy" <<<"$output"'
 expect "hands the report on" 'grep -q "^REPORT=$report$" "$env_file"'
 
 echo

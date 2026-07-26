@@ -20,7 +20,7 @@ compiled:
         - metrics
         - traces
       collector_config: compiled/orders-api.yaml
-      digest: sha256:30630ddb04d11acd6dd0092457766ac52e8c88f1cae6a197dbda9505cbdf8d67
+      digest: sha256:e3a4ba4e94ad2ffc489b8232b59d1cd1328de9b57f4b27ec7b30f8460f358472
     - service_name: payments-api
       tier: tier-1
       pipeline_profile: tier-1-critical
@@ -29,9 +29,13 @@ compiled:
         - metrics
         - traces
       collector_config: compiled/payments-api.yaml
-      digest: sha256:ffce51d004d70b06c8c368cc11531ecc84f9e9ff3dd0e5eccd672d1127ea014a
-not_compiled:
+      digest: sha256:2913c3f01af53a1c4c25fb6db94bd7363402bd15e79a451ad29e5cc078aff269
     - service_name: reporting-worker
-      telemetry_contract: contracts/reporting-worker.yaml
       tier: tier-2
-      reason: 'cannot compile reporting-worker: no Pipeline Profile is published for Service Tier "tier-2", so how its telemetry ships is undecided (profiled tiers: [tier-1])'
+      pipeline_profile: tier-2-supporting
+      signals:
+        - metrics
+        - traces
+      collector_config: compiled/reporting-worker.yaml
+      digest: sha256:1d6ceab9466d1078bcb92f6bb461cc53fd1edab85406041537bb4dbf3ddddac0
+not_compiled: []
