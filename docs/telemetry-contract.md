@@ -52,9 +52,11 @@ otel-guardrail check path/to/telemetry-contract.yaml
 
 Every violated Standard is reported with its **Severity**, blocking ones first:
 
+<!-- verify: check guardrail/examples/missing-attributes-contract.yaml -->
 ```
-legacy-reporting: 1 blocking Standard violation(s), 2 non-blocking
+legacy-reporting: 2 blocking Standard violations failing the build, 2 non-blocking findings to address
   [block] S1: required resource attribute "deployment.environment" is not declared
+  [block] S2: Service Tier "tier-3" mandates the traces Signal, which is not declared
   [warn] S3: recommended resource attribute "service.instance.id" is not declared
   [warn] S3: recommended resource attribute "service.namespace" is not declared
 ```

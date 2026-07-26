@@ -53,7 +53,10 @@ A Standard declares its Severity on each violation it emits, so a single Standar
 | Standard | Severity | Requires |
 | --- | --- | --- |
 | S1 | `block` | The required resource attributes: `service.name`, `service.version`, `deployment.environment`. |
+| S2 | `block` | The Signals a service's **Service Tier** makes mandatory — `tier-1` all three, `tier-2` traces and metrics, `tier-3` traces. Also flags a tier outside the taxonomy. See [service-tiers.md](./service-tiers.md). |
 | S3 | `warn` | The recommended resource attributes: `service.namespace`, `service.instance.id`. Not needed to ship; they tell same-named services and individual replicas apart during triage. |
+
+Every Standard that can `block` also needs a graduation deadline in `guardrail/enforcement.yaml`, or a legacy service violating it can be neither blocked nor deferred — see [enforcement-epoch.md](./enforcement-epoch.md).
 
 ## When a service cannot meet a Standard yet
 

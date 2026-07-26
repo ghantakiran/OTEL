@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/ghantakiran/OTEL/contract"
 )
 
 //go:embed enforcement.yaml
@@ -62,6 +64,11 @@ func parseEnforcementSchedule(data []byte, origin string) (*EnforcementSchedule,
 	}
 	if document.Kind != scheduleKind {
 		return nil, fmt.Errorf("enforcement schedule %s: kind is %q, want %q", origin, document.Kind, scheduleKind)
+	}
+	// This file decides which services block today, so reading one written for a
+	// later schema under this binary's rules is the worst kind of confident wrong.
+	if err := contract.RequireAPIVersion(document.APIVersion, origin, "enforcement schedule"); err != nil {
+		return nil, err
 	}
 
 	// A zero Date is not a missing value the caller can notice later — it reads as

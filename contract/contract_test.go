@@ -1,6 +1,7 @@
 package contract_test
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -21,6 +22,41 @@ func TestLoadRefusesADocumentThatIsNotATelemetryContract(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "WaiverRegister") || !strings.Contains(err.Error(), "TelemetryContract") {
 		t.Errorf("the error does not say what was found and what was wanted: %v", err)
+	}
+}
+
+func TestLoadRefusesAnApiVersionItDoesNotUnderstand(t *testing.T) {
+	// apiVersion is what makes changing this schema survivable: a future version
+	// may move or reinterpret a field. A binary that accepts a version it predates
+	// reads the new file with the old rules and reports confident nonsense, so the
+	// one thing the field must never be is decoded and ignored.
+	unsupported := filepath.Join(t.TempDir(), "telemetry-contract.yaml")
+	body := "apiVersion: guardrail.otel/v99\nkind: TelemetryContract\nservice_name: from-the-future\n"
+	if err := os.WriteFile(unsupported, []byte(body), 0o600); err != nil {
+		t.Fatalf("write Contract: %v", err)
+	}
+
+	_, err := contract.Load(unsupported)
+
+	if err == nil {
+		t.Fatal("a Telemetry Contract declaring an unsupported apiVersion loaded")
+	}
+	if !strings.Contains(err.Error(), "guardrail.otel/v99") || !strings.Contains(err.Error(), contract.APIVersion) {
+		t.Errorf("the error does not say what was found and what this binary supports: %v", err)
+	}
+}
+
+func TestLoadRefusesADocumentDeclaringNoApiVersion(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "telemetry-contract.yaml")
+	body := "kind: TelemetryContract\nservice_name: unversioned\n"
+	if err := os.WriteFile(missing, []byte(body), 0o600); err != nil {
+		t.Fatalf("write Contract: %v", err)
+	}
+
+	_, err := contract.Load(missing)
+
+	if err == nil {
+		t.Fatal("a Telemetry Contract declaring no apiVersion loaded")
 	}
 }
 
