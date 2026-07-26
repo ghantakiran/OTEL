@@ -16,6 +16,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # The Enforcement Epoch dates a service by the first commit that added
+          # its Telemetry Contract, so the sample Contracts need real history.
+          fetch-depth: 0
 
       # Exit 0 — the step must pass.
       - name: Compliant Contract passes

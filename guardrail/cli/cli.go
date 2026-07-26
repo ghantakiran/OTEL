@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"strings"
 	"time"
 
 	"github.com/ghantakiran/OTEL/contract"
@@ -45,10 +46,18 @@ Every violated Standard is reported with its Severity; only a block Severity
 fails the build. A violation held back by an unexpired Waiver is reported with
 its approver and expiry date, and does not fail the build.
 
-  --waivers  Waiver register to honour. Defaults to the org register built into
-             this binary (guardrail/waivers.yaml).
-  --as-of    Day to judge Waiver expiry on, YYYY-MM-DD. Defaults to today; set it
-             to a future day to see which Waivers will have lapsed by then.
+A service whose Telemetry Contract first appeared before the org's Enforcement
+Epoch is legacy: a blocking Standard is reported but held back until that
+Standard's graduation deadline, then blocks by itself. First appearance comes
+from the first git commit that added the Contract, so full history is required.
+
+  --waivers      Waiver register to honour. Defaults to the org register built
+                 into this binary (guardrail/waivers.yaml).
+  --enforcement  Enforcement schedule to apply. Defaults to the org schedule
+                 built into this binary (guardrail/enforcement.yaml).
+  --as-of        Day to judge Waiver expiry and graduation deadlines on,
+                 YYYY-MM-DD. Defaults to today; set it to a future day to see
+                 what will have lapsed or graduated by then.
 
 Exit codes: 0 no blocking Standard violated, 1 a blocking Standard was violated,
 2 the Guardrail could not run.`
@@ -60,7 +69,8 @@ func runCheck(args []string, stdout, stderr io.Writer) int {
 	flags := flag.NewFlagSet("check", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	waiverRegister := flags.String("waivers", "", "Waiver register to honour (default: the register built into this binary)")
-	asOf := flags.String("as-of", "", "day to judge Waiver expiry on, YYYY-MM-DD (default: today)")
+	schedulePath := flags.String("enforcement", "", "enforcement schedule to apply (default: the schedule built into this binary)")
+	asOf := flags.String("as-of", "", "day to judge Waiver expiry and graduation deadlines on, YYYY-MM-DD (default: today)")
 	if err := flags.Parse(args); err != nil {
 		return exitError
 	}
@@ -88,8 +98,19 @@ func runCheck(args []string, stdout, stderr io.Writer) int {
 		return exitError
 	}
 
+	schedule, err := enforcementScheduleFrom(*schedulePath)
+	if err != nil {
+		fmt.Fprintf(stderr, "otel-guardrail: %v\n", err)
+		return exitError
+	}
+
 	preflight, err := guardrail.NewPreflight(guardrail.StandardPolicies(),
-		guardrail.WithWaivers(waivers), guardrail.WithClock(clock))
+		guardrail.WithWaivers(waivers),
+		guardrail.WithEnforcementSchedule(schedule),
+		// The service is dated by its Contract's own git history, so the date is
+		// not the service team's to declare and not theirs to backdate.
+		guardrail.WithFirstAppearance(guardrail.FirstAppearanceInGit(flags.Arg(0))),
+		guardrail.WithClock(clock))
 	if err != nil {
 		fmt.Fprintf(stderr, "otel-guardrail: %v\n", err)
 		return exitError
@@ -101,28 +122,11 @@ func runCheck(args []string, stdout, stderr io.Writer) int {
 		return exitError
 	}
 
-	// Violations arrive most severe first, so the reason a build failed leads
-	// the report and the severities read as groups. A Waiver never removes a
-	// violation from the report — it says why one stopped failing the build, and
-	// until when.
-	waived := len(result.Waived())
-	otherNonBlocking := len(result.NonBlocking()) - waived
-	switch {
-	case len(result.Violations) == 0:
-		fmt.Fprintf(stdout, "%s: Telemetry Contract meets all Standards\n", declared.ServiceName)
-	case result.FailsTheBuild() && waived > 0:
-		fmt.Fprintf(stdout, "%s: %d blocking Standard violation(s), %d non-blocking, %d held back by a Waiver\n",
-			declared.ServiceName, len(result.Blocking()), otherNonBlocking, waived)
-	case result.FailsTheBuild():
-		fmt.Fprintf(stdout, "%s: %d blocking Standard violation(s), %d non-blocking\n",
-			declared.ServiceName, len(result.Blocking()), len(result.NonBlocking()))
-	case waived > 0:
-		fmt.Fprintf(stdout, "%s: nothing fails the build, but %d blocking Standard violation(s) are only held back by a Waiver; %d other non-blocking finding(s) to address\n",
-			declared.ServiceName, waived, otherNonBlocking)
-	default:
-		fmt.Fprintf(stdout, "%s: Telemetry Contract meets every blocking Standard; %d non-blocking finding(s) to address\n",
-			declared.ServiceName, len(result.NonBlocking()))
-	}
+	// Violations arrive most severe first, so the reason a build failed leads the
+	// report and the severities read as groups. Neither a Waiver nor a legacy
+	// deferral ever removes a violation from the report — each says why one
+	// stopped failing the build, and until when.
+	fmt.Fprintf(stdout, "%s: %s\n", declared.ServiceName, summarize(result))
 	for _, v := range result.Violations {
 		fmt.Fprintf(stdout, "  %s\n", v)
 	}
@@ -133,6 +137,59 @@ func runCheck(args []string, stdout, stderr io.Writer) int {
 	return exitOK
 }
 
+// summarize is the one-line headline above the violations. It is built from the
+// parts rather than enumerated case by case, because the parts multiply: a
+// finding can be blocking, held back by a Waiver, held back by a graduation
+// deadline, or merely advisory, and several can be true of one report.
+func summarize(result guardrail.Result) string {
+	if len(result.Violations) == 0 {
+		return "Telemetry Contract meets all Standards"
+	}
+
+	blocking, heldBack, advisory := len(result.Blocking()), len(result.HeldBack()), len(result.Advisory())
+
+	var parts []string
+	if blocking > 0 {
+		parts = append(parts, fmt.Sprintf("%s failing the build", count(blocking, "blocking Standard violation")))
+	}
+	if heldBack > 0 {
+		// Named, not buried in a total, and said with what is holding them: each
+		// of these breaks the build on a known day with nobody deciding anything
+		// further, and the reader needs to know which clock to watch.
+		parts = append(parts, fmt.Sprintf("%s held back by %s",
+			count(heldBack, "blocking Standard violation"), strings.Join(holders(result), " and ")))
+	}
+	if advisory > 0 {
+		parts = append(parts, count(advisory, "non-blocking finding")+" to address")
+	}
+
+	headline := strings.Join(parts, ", ")
+	if blocking > 0 {
+		return headline
+	}
+	return "nothing fails the build — " + headline
+}
+
+// holders names what is keeping blocking violations from failing the build.
+// Both can be at work in one report and they lapse on different days.
+func holders(result guardrail.Result) []string {
+	var named []string
+	if len(result.Waived()) > 0 {
+		named = append(named, "a Waiver")
+	}
+	if len(result.Deferred()) > 0 {
+		named = append(named, "the Enforcement Epoch")
+	}
+	return named
+}
+
+func count(n int, noun string) string {
+	if n == 1 {
+		return "1 " + noun
+	}
+	return fmt.Sprintf("%d %ss", n, noun)
+}
+
 // waiverRegisterFrom picks the register to honour: the one the caller pointed
 // at, else the org register compiled into this binary.
 func waiverRegisterFrom(path string) (*guardrail.WaiverRegister, error) {
@@ -140,6 +197,15 @@ func waiverRegisterFrom(path string) (*guardrail.WaiverRegister, error) {
 		return guardrail.CentralWaiverRegister()
 	}
 	return guardrail.LoadWaiverRegister(path)
+}
+
+// enforcementScheduleFrom picks the schedule to apply: the one the caller
+// pointed at, else the org schedule compiled into this binary.
+func enforcementScheduleFrom(path string) (*guardrail.EnforcementSchedule, error) {
+	if path == "" {
+		return guardrail.CentralEnforcementSchedule()
+	}
+	return guardrail.LoadEnforcementSchedule(path)
 }
 
 // clockAt fixes the day Waiver expiry is judged on. Left empty it is today, so

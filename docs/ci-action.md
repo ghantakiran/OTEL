@@ -20,11 +20,20 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Required. The Enforcement Epoch dates your service by the first git
+          # commit that added your Telemetry Contract, and checkout's default
+          # fetch-depth: 1 leaves no such history in the clone. Without it the
+          # Guardrail cannot tell whether your service is new or legacy, and
+          # stops with exit 2 rather than guessing.
+          fetch-depth: 0
       - uses: ghantakiran/OTEL/.github/actions/preflight@v0.1.0
         with:
           contract: telemetry-contract.yaml
           guardrail-ref: v0.1.0
 ```
+
+> **`fetch-depth: 0` is not optional.** The action cannot supply it for you — it checks out the *Guardrail's* source, while your Telemetry Contract lives in the checkout your own workflow made. If you see `cannot tell when telemetry-contract.yaml first appeared`, this is why.
 
 Make that job a required check on your default branch and a violated Standard can no longer reach `main`.
 

@@ -28,7 +28,15 @@ type Waiver struct {
 // This is the one place expiry arithmetic lives — the expiry report that lists
 // Waivers lapsing within N days asks the same question.
 func (w Waiver) DaysUntilExpiry(asOf time.Time) int {
-	return int(w.Expires.day.Sub(startOfDay(asOf)).Hours() / 24)
+	return w.Expires.daysUntil(asOf)
+}
+
+// daysUntil is the whole days from a given day to this one: positive while the
+// date is still ahead, 0 on the day itself, negative once it has passed. Both
+// a Waiver's expiry and a Standard's graduation deadline are answered here, so
+// "the day it names counts" is decided once.
+func (d Date) daysUntil(asOf time.Time) int {
+	return int(d.day.Sub(startOfDay(asOf)).Hours() / 24)
 }
 
 // startOfDay drops the time of day, so "now" is a calendar day like an expiry.

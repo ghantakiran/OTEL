@@ -61,6 +61,8 @@ A **Waiver** lets one service skip one Standard until an expiry date, downgradin
 
 Waivers are not authored in Rego — a Waiver is not a Standard, it says nothing about what a service must emit. They live in one central register, `guardrail/waivers.yaml`, and are approved by the platform team. See [waivers.md](./waivers.md).
 
+Services that predate the org's standards programme get a grace nobody has to file for: the **Enforcement Epoch** holds every blocking Standard back for them until that Standard's published graduation deadline. That is why authoring a blocking Standard is a two-file change — the Rego, plus a graduation deadline in `guardrail/enforcement.yaml`. See [enforcement-epoch.md](./enforcement-epoch.md).
+
 ## Trying a Standard out
 
 ```

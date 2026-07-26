@@ -1,0 +1,31 @@
+# The org's published enforcement schedule.
+#
+# The Enforcement Epoch is one date that classifies every service. A service
+# whose Telemetry Contract first appears on or after it is NEW: every Standard
+# enforces at its declared Severity immediately. One appearing before it is
+# LEGACY: a blocking Standard is reported but held back until that Standard's
+# graduation deadline passes, at which point it blocks by itself.
+#
+# First appearance is the first git commit that added the Contract, never a
+# field the service declares — see docs/enforcement-epoch.md.
+#
+# Every Standard that can block needs a graduation deadline here. A blocking
+# Standard with no published deadline is an error rather than a default: one
+# default would make the phased rollout permanent, the other would spring the
+# Standard on every legacy service at once, and neither is ours to pick quietly.
+apiVersion: guardrail.otel/v1
+kind: EnforcementSchedule
+
+epoch: 2026-01-01
+
+graduations:
+  # S1 — required resource attributes. The oldest Standard and the cheapest to
+  # meet, so it graduates first.
+  - standard: S1
+    graduates: 2027-01-01
+
+  # S2 — Service Tier fixes the mandatory Signals. Meeting it can mean adding a
+  # Signal a service does not emit at all, which is instrumentation work, so it
+  # gets a longer run-up than S1.
+  - standard: S2
+    graduates: 2027-04-01

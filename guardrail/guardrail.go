@@ -14,6 +14,7 @@ import (
 	"io/fs"
 	"path"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/open-policy-agent/opa/v1/rego"
@@ -83,20 +84,41 @@ type Violation struct {
 	// Waiver that hides its violation is how a Waiver becomes invisible and
 	// permanent — it simply stops failing the build until the Waiver expires.
 	Waived *Waiver `json:"waived,omitempty"`
+	// Deferred is set when this service is legacy — its Contract first appeared
+	// before the Enforcement Epoch — and this Standard has not yet reached its
+	// graduation deadline. Like a Waiver it holds the finding back in the open,
+	// and lapses on a published day with nobody taking an action.
+	Deferred *LegacyGrace `json:"deferred,omitempty"`
 }
 
 func (v Violation) String() string {
-	if v.Waived != nil {
-		return fmt.Sprintf("[%s, waived by %s until %s] %s: %s",
-			v.Severity, v.Waived.ApprovedBy, v.Waived.Expires, v.Standard, v.Message)
+	holders := v.heldBackBy()
+	if len(holders) == 0 {
+		return fmt.Sprintf("[%s] %s: %s", v.Severity, v.Standard, v.Message)
 	}
-	return fmt.Sprintf("[%s] %s: %s", v.Severity, v.Standard, v.Message)
+	return fmt.Sprintf("[%s, %s] %s: %s", v.Severity, strings.Join(holders, "; "), v.Standard, v.Message)
+}
+
+// heldBackBy names everything keeping this violation from failing the build.
+// Both a Waiver and a legacy deferral can apply at once and they lapse on
+// different days, so the output names each rather than reporting whichever was
+// found first — a service told only about the later one is told the wrong date.
+func (v Violation) heldBackBy() []string {
+	var holders []string
+	if v.Waived != nil {
+		holders = append(holders, fmt.Sprintf("waived by %s until %s", v.Waived.ApprovedBy, v.Waived.Expires))
+	}
+	if v.Deferred != nil {
+		holders = append(holders, fmt.Sprintf("legacy service, blocks from %s", v.Deferred.Graduates))
+	}
+	return holders
 }
 
 // failsTheBuild is the effective enforcement of one violation: a block Severity
-// stops the pipeline unless an unexpired Waiver holds it back.
+// stops the pipeline unless an unexpired Waiver or an unreached graduation
+// deadline holds it back.
 func (v Violation) failsTheBuild() bool {
-	return v.Severity == SeverityBlock && v.Waived == nil
+	return v.Severity == SeverityBlock && len(v.heldBackBy()) == 0
 }
 
 // Result is the outcome of running the Preflight Guardrail over one Telemetry
@@ -136,6 +158,45 @@ func (r Result) Waived() []Violation {
 	return selected
 }
 
+// HeldBack is the violations that would fail the build on their declared
+// Severity but do not, because a Waiver or a graduation deadline is holding them
+// back. Each one is a build that breaks on a known future day with no further
+// decision, which is a different thing to report than an advisory finding.
+func (r Result) HeldBack() []Violation {
+	var selected []Violation
+	for _, v := range r.Violations {
+		if v.Severity == SeverityBlock && !v.failsTheBuild() {
+			selected = append(selected, v)
+		}
+	}
+	return selected
+}
+
+// Advisory is the violations that never fail the build on their own Severity —
+// the info and warn findings a service should address but is not gated on.
+func (r Result) Advisory() []Violation {
+	var selected []Violation
+	for _, v := range r.Violations {
+		if v.Severity != SeverityBlock {
+			selected = append(selected, v)
+		}
+	}
+	return selected
+}
+
+// Deferred is the violations a legacy service is still held back from, because
+// the Standard has not reached its graduation deadline. They are reported like
+// any other; on the published day they start failing the build unattended.
+func (r Result) Deferred() []Violation {
+	var selected []Violation
+	for _, v := range r.Violations {
+		if v.Deferred != nil {
+			selected = append(selected, v)
+		}
+	}
+	return selected
+}
+
 func (r Result) violationsThatBlock(blocking bool) []Violation {
 	var selected []Violation
 	for _, v := range r.Violations {
@@ -150,6 +211,8 @@ func (r Result) violationsThatBlock(blocking bool) []Violation {
 type Preflight struct {
 	standards rego.PreparedEvalQuery
 	waivers   *WaiverRegister
+	schedule  *EnforcementSchedule
+	appeared  FirstAppearance
 	now       Clock
 }
 
@@ -168,9 +231,25 @@ func WithWaivers(register *WaiverRegister) Option {
 	return func(p *Preflight) { p.waivers = register }
 }
 
-// WithClock fixes the day Waiver expiry is judged on. The default is time.Now.
+// WithClock fixes the day a Waiver expiry or a graduation deadline is judged
+// on. The default is time.Now.
 func WithClock(now Clock) Option {
 	return func(p *Preflight) { p.now = now }
+}
+
+// WithEnforcementSchedule gives the Guardrail the org's published Enforcement
+// Epoch and graduation deadlines, so a legacy service is held back from a
+// blocking Standard until that Standard graduates. It requires
+// WithFirstAppearance: a schedule with no way to date the service decides
+// nothing. Without either, every Standard enforces at its declared Severity.
+func WithEnforcementSchedule(schedule *EnforcementSchedule) Option {
+	return func(p *Preflight) { p.schedule = schedule }
+}
+
+// WithFirstAppearance tells the Guardrail how to date a service's Telemetry
+// Contract. Production passes FirstAppearanceInGit; a test passes the day directly.
+func WithFirstAppearance(appeared FirstAppearance) Option {
+	return func(p *Preflight) { p.appeared = appeared }
 }
 
 // NewPreflight compiles a Standard catalog into a Preflight Guardrail. The
@@ -204,6 +283,9 @@ func NewPreflight(catalog fs.FS, options ...Option) (*Preflight, error) {
 	}
 	if preflight.now == nil {
 		preflight.now = time.Now
+	}
+	if preflight.schedule != nil && preflight.appeared == nil {
+		return nil, fmt.Errorf("an enforcement schedule needs a way to date the service: pass WithFirstAppearance alongside it")
 	}
 	return preflight, nil
 }
@@ -250,6 +332,13 @@ func (p *Preflight) Check(ctx context.Context, c contract.Contract) (Result, err
 		}
 	}
 
+	// The Enforcement Epoch is likewise not a Standard: it does not change what
+	// the catalog found, only how hard it lands on a service that predates the
+	// org's standards programme.
+	if err := p.deferForLegacyService(violations, asOf); err != nil {
+		return Result{}, err
+	}
+
 	// Rego sets are unordered; CI output and exit codes must be reproducible.
 	// Most severe first, so the reason a build failed leads the output.
 	sort.Slice(violations, func(i, j int) bool {
@@ -263,6 +352,37 @@ func (p *Preflight) Check(ctx context.Context, c contract.Contract) (Result, err
 		return a.Message < b.Message
 	})
 	return Result{Violations: violations}, nil
+}
+
+// deferForLegacyService holds a legacy service back from each blocking Standard
+// that has not reached its graduation deadline. A new service, or a Guardrail
+// running without a published schedule, is untouched.
+func (p *Preflight) deferForLegacyService(violations []Violation, asOf time.Time) error {
+	if p.schedule == nil {
+		return nil
+	}
+
+	appeared, err := p.appeared()
+	if err != nil {
+		return err
+	}
+	if p.schedule.Classify(appeared) == ServiceNew {
+		return nil
+	}
+
+	for i, v := range violations {
+		if v.Severity != SeverityBlock {
+			continue
+		}
+		grace, deferred, err := p.schedule.grace(v.Standard, asOf)
+		if err != nil {
+			return err
+		}
+		if deferred {
+			violations[i].Deferred = &grace
+		}
+	}
+	return nil
 }
 
 // asDocument converts a Contract into the generic document Rego evaluates against.

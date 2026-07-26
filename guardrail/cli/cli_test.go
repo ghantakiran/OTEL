@@ -162,6 +162,26 @@ func severityReportedFor(out, standard string) string {
 	return ""
 }
 
+func TestCheckRefusesToJudgeAContractItCannotDate(t *testing.T) {
+	// Committed nowhere, so the Enforcement Epoch cannot tell whether this
+	// service is new or legacy. Guessing either way is worse than stopping — one
+	// guess blocks every legacy service the moment someone shallow-clones, the
+	// other hands every service a way out.
+	uncommitted := filepath.Join(t.TempDir(), "telemetry-contract.yaml")
+	if err := os.WriteFile(uncommitted, []byte("service_name: undated\ntier: tier-3\nsignals: [traces]\n"), 0o600); err != nil {
+		t.Fatalf("write Contract: %v", err)
+	}
+
+	code, _, errOut := run(t, "check", uncommitted)
+
+	if code != 2 {
+		t.Fatalf("exit code = %d, want 2 — this is a Guardrail that could not run, not a non-compliant Contract", code)
+	}
+	if !strings.Contains(errOut, "fetch-depth") {
+		t.Errorf("stderr does not say how to fix it:\n%s", errOut)
+	}
+}
+
 func run(t *testing.T, args ...string) (code int, stdout, stderr string) {
 	t.Helper()
 

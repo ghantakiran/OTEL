@@ -21,6 +21,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # The Enforcement Epoch dates a service by the first commit that added
+          # its Telemetry Contract; checkout's default shallow clone has no such
+          # history, and the Guardrail stops rather than guessing.
+          fetch-depth: 0
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
