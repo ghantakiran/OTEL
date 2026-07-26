@@ -1,0 +1,159 @@
+name: Preflight Guardrail
+description: >-
+  Runs the Preflight Guardrail over a service's Telemetry Contract and fails the
+  step when a blocking Standard is violated.
+
+inputs:
+  contract:
+    description: Path to the service's Telemetry Contract, relative to the workspace.
+    required: false
+    default: telemetry-contract.yaml
+  guardrail-repository:
+    description: Repository holding the Preflight Guardrail source.
+    required: false
+    default: ghantakiran/OTEL
+  guardrail-ref:
+    description: >-
+      Git ref of guardrail-repository to build the Guardrail from. Pin this to a
+      tag or a commit SHA so a Standards change never surprises a service repo
+      mid-PR.
+    required: false
+    default: master
+  guardrail-token:
+    description: >-
+      Token used to check out guardrail-repository. The default only works when
+      that repository is public or is this same repository; otherwise supply a
+      token with read access to it.
+    required: false
+    default: ${{ github.token }}
+  guardrail-source:
+    description: >-
+      Path to an already-checked-out Guardrail source tree. When set, the
+      checkout of guardrail-repository is skipped. Used by the Guardrail's own
+      repository to test itself; service repos leave this empty.
+    required: false
+    default: ''
+  fail-on-violation:
+    description: >-
+      Whether a violated Standard fails the step. Set to 'false' for a
+      report-only rollout — violations are still annotated and summarised, but
+      the step passes. A Guardrail that could not run always fails the step.
+    required: false
+    default: 'true'
+
+outputs:
+  exit-code:
+    description: >-
+      The Guardrail's exit code: 0 compliant, 1 a Standard was violated, 2 the
+      Guardrail could not run.
+    value: ${{ steps.preflight.outputs.exit-code }}
+  outcome:
+    description: One of 'compliant', 'violation', 'error'.
+    value: ${{ steps.preflight.outputs.outcome }}
+
+runs:
+  using: composite
+  steps:
+    # --- Obtaining the binary: checkout + build ------------------------------
+    # There is no release pipeline for otel-guardrail yet, so the action builds
+    # it from a pinned source checkout. When releases exist, these two steps
+    # collapse into a single download of a pinned release asset; nothing below
+    # this seam changes.
+    - name: Check out the Preflight Guardrail source
+      if: inputs.guardrail-source == ''
+      uses: actions/checkout@v4
+      with:
+        repository: ${{ inputs.guardrail-repository }}
+        ref: ${{ inputs.guardrail-ref }}
+        token: ${{ inputs.guardrail-token }}
+        path: .otel-guardrail-src
+        persist-credentials: false
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version-file: ${{ inputs.guardrail-source || '.otel-guardrail-src' }}/go.mod
+        cache-dependency-path: ${{ inputs.guardrail-source || '.otel-guardrail-src' }}/go.sum
+
+    - name: Build the Preflight Guardrail
+      shell: bash
+      env:
+        GUARDRAIL_SRC: ${{ inputs.guardrail-source || '.otel-guardrail-src' }}
+      run: |
+        set -euo pipefail
+        cd "$GUARDRAIL_SRC"
+        go build -o "$RUNNER_TEMP/otel-guardrail" ./guardrail/cmd/otel-guardrail
+    # --- End of the binary-distribution seam --------------------------------
+
+    - name: Check the Telemetry Contract
+      id: preflight
+      shell: bash
+      env:
+        CONTRACT: ${{ inputs.contract }}
+        FAIL_ON_VIOLATION: ${{ inputs.fail-on-violation }}
+      run: |
+        set -euo pipefail
+
+        guardrail="$RUNNER_TEMP/otel-guardrail"
+        output="$RUNNER_TEMP/preflight-output.txt"
+
+        # The exit code is the entire contract between the CLI and this action:
+        #   0 compliant, 1 a Standard was violated, 2 the Guardrail could not run.
+        # Branch on the code, never on the text — the Severity model will change
+        # the text without changing the codes.
+        if [ -x "$guardrail" ]; then
+          # `|| code=$?` is deliberate: under `set -e` a bare non-zero command
+          # would abort the step before we could read the code we came here for.
+          code=0
+          "$guardrail" check "$CONTRACT" >"$output" 2>&1 || code=$?
+        else
+          # A shell asked to run a missing file reports 127 on some shells and 1
+          # on others, and 1 means "the Contract violates a Standard" — which
+          # this emphatically is not. Classify it here rather than letting the
+          # shell classify it for us.
+          code=2
+          echo "otel-guardrail was not built: no executable at $guardrail" >"$output"
+        fi
+
+        cat "$output"
+        echo "exit-code=$code" >>"$GITHUB_OUTPUT"
+
+        # Workflow commands are single-line: encode % first, then newlines.
+        annotation="$(sed 's/%/%25/g' "$output" | awk 'BEGIN { ORS = "%0A" } { print }')"
+
+        summary() {
+          {
+            echo "### $1"
+            echo
+            echo "$2"
+            echo
+            echo '```'
+            cat "$output"
+            echo '```'
+          } >>"$GITHUB_STEP_SUMMARY"
+        }
+
+        case "$code" in
+          0)
+            echo "outcome=compliant" >>"$GITHUB_OUTPUT"
+            summary "Preflight Guardrail: passed" \
+              "\`$CONTRACT\` violates no blocking Standard."
+            ;;
+          1)
+            echo "outcome=violation" >>"$GITHUB_OUTPUT"
+            echo "::error file=$CONTRACT,title=Telemetry Contract violates a Standard::$annotation"
+            summary "Preflight Guardrail: blocked" \
+              "\`$CONTRACT\` violates a Standard. Fix the Contract, or file a Waiver if the Standard cannot be met yet."
+            if [ "$FAIL_ON_VIOLATION" = "true" ]; then
+              exit 1
+            fi
+            echo "::notice::fail-on-violation is false — reporting the violation without failing the step."
+            ;;
+          *)
+            echo "outcome=error" >>"$GITHUB_OUTPUT"
+            echo "::error title=The Preflight Guardrail could not run::$annotation"
+            summary "Preflight Guardrail: could not run" \
+              "This is a tooling failure, not a finding about \`$CONTRACT\`. The Telemetry Contract has not been judged against any Standard."
+            exit "$code"
+            ;;
+        esac

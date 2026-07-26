@@ -1,0 +1,85 @@
+name: Preflight CI action
+
+# Exercises .github/actions/preflight against this repository's own sample
+# Telemetry Contracts, proving the pass path, the block path, and that a
+# Guardrail that could not run is reported as a tooling failure rather than as
+# a non-compliant Contract.
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  self-test:
+    name: The CI action honours the Guardrail's exit codes
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Exit 0 — the step must pass.
+      - name: Compliant Contract passes
+        uses: ./.github/actions/preflight
+        with:
+          contract: guardrail/examples/compliant-contract.yaml
+          guardrail-source: .
+
+      # Exit 1, report-only — the step passes, so the outputs are readable.
+      - name: Violating Contract is reported as a violation
+        id: violation
+        uses: ./.github/actions/preflight
+        with:
+          contract: guardrail/examples/missing-attributes-contract.yaml
+          guardrail-source: .
+          fail-on-violation: 'false'
+
+      - name: Assert the violation was classified as a violation
+        env:
+          EXIT_CODE: ${{ steps.violation.outputs.exit-code }}
+          OUTCOME: ${{ steps.violation.outputs.outcome }}
+        run: |
+          set -euo pipefail
+          if [ "$EXIT_CODE" != "1" ] || [ "$OUTCOME" != "violation" ]; then
+            echo "::error::expected exit-code=1 outcome=violation, got exit-code=$EXIT_CODE outcome=$OUTCOME"
+            exit 1
+          fi
+
+      # Exit 1, enforcing — the step must fail.
+      - name: Violating Contract blocks the build
+        id: blocked
+        continue-on-error: true
+        uses: ./.github/actions/preflight
+        with:
+          contract: guardrail/examples/missing-attributes-contract.yaml
+          guardrail-source: .
+
+      - name: Assert the violation failed the step
+        env:
+          RESULT: ${{ steps.blocked.outcome }}
+        run: |
+          set -euo pipefail
+          if [ "$RESULT" != "failure" ]; then
+            echo "::error::a violated Standard did not fail the step — the Guardrail is not blocking"
+            exit 1
+          fi
+
+      # Exit 2 — a Guardrail that could not run always fails the step, even
+      # when violations are report-only.
+      - name: Missing Contract fails even in report-only mode
+        id: tooling-failure
+        continue-on-error: true
+        uses: ./.github/actions/preflight
+        with:
+          contract: guardrail/examples/no-such-contract.yaml
+          guardrail-source: .
+          fail-on-violation: 'false'
+
+      - name: Assert the tooling failure failed the step
+        env:
+          RESULT: ${{ steps.tooling-failure.outcome }}
+        run: |
+          set -euo pipefail
+          if [ "$RESULT" != "failure" ]; then
+            echo "::error::a Guardrail that could not run did not fail the step"
+            exit 1
+          fi
