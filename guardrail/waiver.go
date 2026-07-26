@@ -63,6 +63,17 @@ func (d Date) IsZero() bool {
 
 const dateLayout = "2006-01-02"
 
+// ParseDate reads a calendar day written YYYY-MM-DD. Every date in this system
+// is a day rather than an instant — a Waiver expires on a day, a Standard
+// graduates on a day — so this is the one way to make one.
+func ParseDate(day string) (Date, error) {
+	parsed, err := time.Parse(dateLayout, day)
+	if err != nil {
+		return Date{}, fmt.Errorf("%q is not a YYYY-MM-DD date", day)
+	}
+	return Date{day: parsed}, nil
+}
+
 // UnmarshalYAML reads a plain YYYY-MM-DD scalar. The message stays neutral about
 // which field it came from: a Date is a Waiver's expiry, the Enforcement Epoch
 // and a graduation deadline, and saying "expiry date" for a bad `epoch:` sent

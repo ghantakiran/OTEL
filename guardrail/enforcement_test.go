@@ -170,7 +170,7 @@ func TestANewServiceIsBlockedByAStandardThatLegacyServicesAreStillDeferredFrom(t
 func TestADeferredViolationIsStillReportedWithTheDayItStartsBlocking(t *testing.T) {
 	result := checkEpoch(t, epochOf("2026-01-01"), firstAppeared(t, "2025-06-11"), on(t, "2026-08-01"))
 
-	deferred := result.Deferred()
+	deferred := result.With(guardrail.EnforcementHeldBack)
 	if len(deferred) != 1 {
 		t.Fatalf("want the violation reported while deferred, got %+v", result.Violations)
 	}
@@ -218,7 +218,7 @@ func TestAWaiverAndALegacyDeferralBothNameTheirOwnExpiry(t *testing.T) {
 	}
 
 	if result.FailsTheBuild() {
-		t.Fatalf("want the build to pass, got %+v", result.Blocking())
+		t.Fatalf("want the build to pass, got %+v", result.With(guardrail.EnforcementFailsBuild))
 	}
 	reported := result.Violations[0].String()
 	for _, day := range []string{"2026-12-01", "2027-01-01"} {

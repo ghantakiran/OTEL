@@ -1,0 +1,36 @@
+# The org's Service Tier taxonomy — the single definition of what tiers exist and
+# what each one mandates.
+#
+# This is the source of truth for BOTH consumers. Go reads it here; the S2 policy
+# receives it as the Rego data document `data.otel.taxonomy` and reads it from
+# there. No .rego file names a tier, and a test enforces that: policy is a
+# consumer of this taxonomy, never its definition.
+#
+# The Control Plane keys Pipeline Profiles off these same identifiers (ADR 0005),
+# which is why the taxonomy could not stay inside a policy file — two copies that
+# fail independently, and silently, is how a Contract passes Preflight and then
+# compiles to the wrong pipeline.
+#
+# The tiers are deliberately NESTED: tier-3 ⊂ tier-2 ⊂ tier-1. Promoting a service
+# only ever adds obligations, never swaps them. S2 enforces a floor, not a ceiling —
+# a Signal a tier does not mandate is optional, not forbidden.
+apiVersion: guardrail.otel/v1
+kind: ServiceTierTaxonomy
+
+tiers:
+  - tier: tier-1
+    criticality: >-
+      Customer-facing or revenue-critical. An outage is visible outside the org.
+    mandatory_signals: [traces, metrics, logs]
+
+  - tier: tier-2
+    criticality: >-
+      Important internal or supporting service. Its degradation reaches other
+      teams, so it must be continuously measurable.
+    mandatory_signals: [traces, metrics]
+
+  - tier: tier-3
+    criticality: >-
+      Batch jobs, tooling, low-traffic services. Traces are the floor: a
+      black-box service degrades the observability of everything calling it.
+    mandatory_signals: [traces]

@@ -95,8 +95,20 @@ The enforcement weight of a Standard when violated: `info`, `warn`, or `block`. 
 _Avoid_: Level, priority
 
 **Waiver**:
-A time-boxed, owner-approved exemption that lets a specific service skip a specific Standard until an expiry date, downgrading its effective enforcement from `block` to non-failing.
+A time-boxed, owner-approved exemption that lets a specific service skip a specific Standard until an expiry date, downgrading its Effective Enforcement from `block` to non-failing.
 _Avoid_: Exception, override, suppression, ignore
+
+**Effective Enforcement**:
+What actually happens to a violated Standard on the day it is checked: the Severity the Standard declared, adjusted by anything holding it back. One of three — it **fails the build**, it is **held back**, or it is **advisory**. Distinct from Severity: a `block` Standard held back by a Waiver is still a `block` Standard.
+_Avoid_: Effective severity, outcome, status, verdict
+
+**Hold**:
+One thing keeping a `block` Standard from failing a build, carrying the day it lapses — either a Waiver or the Enforcement Epoch's grace for a legacy service. Several can apply to one violation at once, and they lapse on different days. A Hold never applies to a Standard that was not going to fail the build anyway.
+_Avoid_: Suppression, exemption, grace (bare), deferral
+
+**Service Tier Taxonomy**:
+The org's single definition of which Service Tiers exist and which Signals each mandates. It is a document the platform owns, read both by Guardrails and by the Control Plane when it selects a Pipeline Profile; a Standard consumes it and never defines it.
+_Avoid_: Tier list, tier config, tier map
 
 **Enforcement Epoch**:
 A single published cutoff date that classifies a service as new or legacy: a service whose Telemetry Contract first appears on or after the Epoch is **new** (Standards `block` immediately); one appearing before is **legacy** (Standards `warn` until each Standard's own graduation deadline).
@@ -113,6 +125,8 @@ _Avoid_: Cutoff, go-live, launch date
 - A **Preflight Guardrail** checks a **Telemetry Contract** and collector config against **Standards** (does the declaration comply?).
 - A **Pipeline Guardrail** checks live telemetry against the **Telemetry Contract** and **Standards** (does reality match the declaration?).
 - Each **Standard** carries a **Severity**; only `block` fails a build.
+- A violated Standard's **Effective Enforcement** is its **Severity** adjusted by its **Holds**; a **Waiver** and the **Enforcement Epoch** are both **Holds**.
+- The **Service Tier Taxonomy** defines the **Service Tiers**; both a **Standard** and a **Pipeline Profile** read it rather than restating it.
 - The **Enforcement Epoch** decides whether a service is new (`block` now) or legacy (`warn` until deadline).
 - A **Waiver** exempts one service from one **Standard** until it expires.
 - The **Control Plane** **Compiles** a **Telemetry Contract** with its tier's **Pipeline Profile** into collector configuration.

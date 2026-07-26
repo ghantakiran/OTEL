@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/open-policy-agent/opa/v1/rego"
+	"github.com/open-policy-agent/opa/v1/storage/inmem"
 
 	"github.com/ghantakiran/OTEL/contract"
 )
@@ -74,142 +75,45 @@ func (s Severity) validate(standard string) error {
 }
 
 // Violation is one Standard a Telemetry Contract fails to meet, carrying the
-// Severity the Standard declared for it.
+// Severity the Standard declared for it and anything holding that Severity back.
 type Violation struct {
 	Standard string   `json:"standard"`
 	Severity Severity `json:"severity"`
 	Message  string   `json:"message"`
-	// Waived is the Waiver holding this violation back, when one is in force for
-	// this service and this Standard. A waived violation is still reported — a
-	// Waiver that hides its violation is how a Waiver becomes invisible and
-	// permanent — it simply stops failing the build until the Waiver expires.
-	Waived *Waiver `json:"waived,omitempty"`
-	// Deferred is set when this service is legacy — its Contract first appeared
-	// before the Enforcement Epoch — and this Standard has not yet reached its
-	// graduation deadline. Like a Waiver it holds the finding back in the open,
-	// and lapses on a published day with nobody taking an action.
-	Deferred *LegacyGrace `json:"deferred,omitempty"`
+	// Holds is everything keeping this violation from failing the build — a
+	// Waiver, the Enforcement Epoch's legacy grace, or both at once. A held-back
+	// violation is still reported: one that vanishes from the output is one
+	// nobody retires. See effective_enforcement.go for what this means.
+	Holds []Hold `json:"holds,omitempty"`
 }
 
 func (v Violation) String() string {
-	holders := v.heldBackBy()
-	if len(holders) == 0 {
+	holds := v.HeldBackBy()
+	if len(holds) == 0 {
 		return fmt.Sprintf("[%s] %s: %s", v.Severity, v.Standard, v.Message)
 	}
-	return fmt.Sprintf("[%s, %s] %s: %s", v.Severity, strings.Join(holders, "; "), v.Standard, v.Message)
-}
-
-// heldBackBy names everything keeping this violation from failing the build.
-// Both a Waiver and a legacy deferral can apply at once and they lapse on
-// different days, so the output names each rather than reporting whichever was
-// found first — a service told only about the later one is told the wrong date.
-func (v Violation) heldBackBy() []string {
-	var holders []string
-	if v.Waived != nil {
-		holders = append(holders, fmt.Sprintf("waived by %s until %s", v.Waived.ApprovedBy, v.Waived.Expires))
+	// Every Hold is named, not just the first: they lapse on different days, and a
+	// service told about only one of them is told the wrong date.
+	described := make([]string, 0, len(holds))
+	for _, h := range holds {
+		described = append(described, h.String())
 	}
-	if v.Deferred != nil {
-		holders = append(holders, fmt.Sprintf("legacy service, blocks from %s", v.Deferred.Graduates))
-	}
-	return holders
-}
-
-// failsTheBuild is the effective enforcement of one violation: a block Severity
-// stops the pipeline unless an unexpired Waiver or an unreached graduation
-// deadline holds it back.
-func (v Violation) failsTheBuild() bool {
-	return v.Severity == SeverityBlock && len(v.heldBackBy()) == 0
+	return fmt.Sprintf("[%s, %s] %s: %s", v.Severity, strings.Join(described, "; "), v.Standard, v.Message)
 }
 
 // Result is the outcome of running the Preflight Guardrail over one Telemetry
-// Contract. It owns the enforcement rule — only a block Severity fails a build
-// (ADR 0003) — so a caller never re-derives that rule from severities.
+// Contract. Grouping violations by their effective enforcement — and the one
+// question CI asks, FailsTheBuild — live in effective_enforcement.go, so the rule
+// ADR 0003 is about has exactly one implementation.
 type Result struct {
 	// Violations is every Standard the Contract failed, most severe first.
 	Violations []Violation
 }
 
-// FailsTheBuild reports whether any violated Standard is severe enough to stop
-// the pipeline. It is the only question CI has to ask.
-func (r Result) FailsTheBuild() bool {
-	return len(r.Blocking()) > 0
-}
-
-// Blocking is the violations that fail the build.
-func (r Result) Blocking() []Violation {
-	return r.violationsThatBlock(true)
-}
-
-// NonBlocking is the violations that are reported but let the build through.
-func (r Result) NonBlocking() []Violation {
-	return r.violationsThatBlock(false)
-}
-
-// Waived is the violations an unexpired Waiver is holding back. They are
-// reported like any other; they just do not fail the build until the Waiver
-// expires, at which point enforcement reverts on its own.
-func (r Result) Waived() []Violation {
-	var selected []Violation
-	for _, v := range r.Violations {
-		if v.Waived != nil {
-			selected = append(selected, v)
-		}
-	}
-	return selected
-}
-
-// HeldBack is the violations that would fail the build on their declared
-// Severity but do not, because a Waiver or a graduation deadline is holding them
-// back. Each one is a build that breaks on a known future day with no further
-// decision, which is a different thing to report than an advisory finding.
-func (r Result) HeldBack() []Violation {
-	var selected []Violation
-	for _, v := range r.Violations {
-		if v.Severity == SeverityBlock && !v.failsTheBuild() {
-			selected = append(selected, v)
-		}
-	}
-	return selected
-}
-
-// Advisory is the violations that never fail the build on their own Severity —
-// the info and warn findings a service should address but is not gated on.
-func (r Result) Advisory() []Violation {
-	var selected []Violation
-	for _, v := range r.Violations {
-		if v.Severity != SeverityBlock {
-			selected = append(selected, v)
-		}
-	}
-	return selected
-}
-
-// Deferred is the violations a legacy service is still held back from, because
-// the Standard has not reached its graduation deadline. They are reported like
-// any other; on the published day they start failing the build unattended.
-func (r Result) Deferred() []Violation {
-	var selected []Violation
-	for _, v := range r.Violations {
-		if v.Deferred != nil {
-			selected = append(selected, v)
-		}
-	}
-	return selected
-}
-
-func (r Result) violationsThatBlock(blocking bool) []Violation {
-	var selected []Violation
-	for _, v := range r.Violations {
-		if v.failsTheBuild() == blocking {
-			selected = append(selected, v)
-		}
-	}
-	return selected
-}
-
 // Preflight is the static Guardrail that runs before deploy.
 type Preflight struct {
 	standards rego.PreparedEvalQuery
+	taxonomy  *Taxonomy
 	waivers   *WaiverRegister
 	schedule  *EnforcementSchedule
 	appeared  FirstAppearance
@@ -235,6 +139,15 @@ func WithWaivers(register *WaiverRegister) Option {
 // on. The default is time.Now.
 func WithClock(now Clock) Option {
 	return func(p *Preflight) { p.now = now }
+}
+
+// WithTaxonomy gives the Guardrail a Service Tier taxonomy for the Standards that
+// need one. It defaults to the org taxonomy compiled into this binary — unlike
+// Waivers and the enforcement schedule, this is not optional: S2 cannot decide
+// anything without it, and an absent taxonomy would make every declared tier look
+// unknown and block the whole fleet.
+func WithTaxonomy(taxonomy *Taxonomy) Option {
+	return func(p *Preflight) { p.taxonomy = taxonomy }
 }
 
 // WithEnforcementSchedule gives the Guardrail the org's published Enforcement
@@ -272,15 +185,29 @@ func NewPreflight(catalog fs.FS, options ...Option) (*Preflight, error) {
 		return nil, fmt.Errorf("read Standard catalog: %w", err)
 	}
 
+	preflight := &Preflight{}
+	for _, option := range options {
+		option(preflight)
+	}
+	if preflight.taxonomy == nil {
+		taxonomy, err := CentralTaxonomy()
+		if err != nil {
+			return nil, fmt.Errorf("load the Service Tier taxonomy: %w", err)
+		}
+		preflight.taxonomy = taxonomy
+	}
+
+	// The taxonomy reaches the Standards as a Rego *data* document, not as part of
+	// the input: input is the Contract under test, data is what the org has
+	// decided. A Standard reads data.otel.taxonomy; none of them defines a tier.
+	store := inmem.NewFromObject(map[string]any{"otel": map[string]any{"taxonomy": preflight.taxonomy.asRegoData()}})
+	regoOptions = append(regoOptions, rego.Store(store))
+
 	standards, err := rego.New(regoOptions...).PrepareForEval(context.Background())
 	if err != nil {
 		return nil, fmt.Errorf("compile Standard catalog: %w", err)
 	}
-
-	preflight := &Preflight{standards: standards}
-	for _, option := range options {
-		option(preflight)
-	}
+	preflight.standards = standards
 	if preflight.now == nil {
 		preflight.now = time.Now
 	}
@@ -330,13 +257,14 @@ func (p *Preflight) Check(ctx context.Context, c contract.Contract) (Result, err
 	// modify. A warn Standard is already non-failing; recording a modifier against
 	// one would make the report name a Waiver that is holding nothing back, and
 	// point the reader at its expiry date instead of the date that matters.
+	// Both a Waiver and the Enforcement Epoch are recorded as Holds, and
+	// Violation.hold declines to record one against a Standard that never fails
+	// the build — so a modifier can only ever attach where there is enforcement to
+	// modify. That is enforced in one place rather than remembered in two.
 	asOf := p.now()
 	for i, v := range violations {
-		if v.Severity != SeverityBlock {
-			continue
-		}
 		if w, waived := p.waivers.InForce(c.ServiceName, v.Standard, asOf); waived {
-			violations[i].Waived = &w
+			violations[i].hold(waiverHold(w))
 		}
 	}
 
@@ -387,7 +315,7 @@ func (p *Preflight) deferForLegacyService(violations []Violation, asOf time.Time
 			return err
 		}
 		if deferred {
-			violations[i].Deferred = &grace
+			violations[i].hold(graceHold(grace))
 		}
 	}
 	return nil

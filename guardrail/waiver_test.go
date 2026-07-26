@@ -204,12 +204,16 @@ func TestAWaivedViolationIsStillReportedWithItsExpiry(t *testing.T) {
 	if !reports(result.Violations, "S1", "deployment.environment") {
 		t.Fatalf("the waived S1 violation vanished from the report: %+v", result.Violations)
 	}
-	waived := result.Waived()
+	waived := result.With(guardrail.EnforcementHeldBack)
 	if len(waived) != 1 {
 		t.Fatalf("%d waived violation(s), want 1: %+v", len(waived), result.Violations)
 	}
-	if got := waived[0].Waived.Expires.String(); got != "2026-10-01" {
-		t.Errorf("waived violation carries expiry %q, want 2026-10-01", got)
+	holds := waived[0].HeldBackBy()
+	if len(holds) != 1 || holds[0].Kind != guardrail.HoldByWaiver {
+		t.Fatalf("the violation is not held back by exactly one Waiver: %+v", holds)
+	}
+	if got := holds[0].Lapses().String(); got != "2026-10-01" {
+		t.Errorf("the Waiver holding it back lapses %q, want 2026-10-01", got)
 	}
 	if !strings.Contains(waived[0].String(), "2026-10-01") {
 		t.Errorf("the reported line hides the expiry date: %s", waived[0])
@@ -230,8 +234,8 @@ func TestAnExpiredWaiverNoLongerHoldsBackTheStandard(t *testing.T) {
 	if !reverted.FailsTheBuild() {
 		t.Fatalf("an expired Waiver still held back a blocking Standard: %+v", reverted.Violations)
 	}
-	if len(reverted.Waived()) != 0 {
-		t.Errorf("an expired Waiver is still attached to a violation: %+v", reverted.Waived())
+	if held := reverted.With(guardrail.EnforcementHeldBack); len(held) != 0 {
+		t.Errorf("an expired Waiver is still holding a violation back: %+v", held)
 	}
 }
 
@@ -346,11 +350,20 @@ waivers:
 		t.Fatalf("check: %v", err)
 	}
 
-	if len(result.Advisory()) == 0 {
+	if len(result.With(guardrail.EnforcementAdvisory)) == 0 {
 		t.Fatal("fixture no longer violates a warn Standard, so this test proves nothing")
 	}
-	if waived := result.Waived(); len(waived) != 0 {
-		t.Errorf("a Waiver attached to a violation that never fails the build: %+v", waived)
+	if held := result.With(guardrail.EnforcementHeldBack); len(held) != 0 {
+		t.Errorf("a Waiver is holding back a violation that never fails the build: %+v", held)
+	}
+	// Defence in depth, and the invariant worth stating outright: no Hold is even
+	// recorded. Effective Enforcement would report the finding as advisory either
+	// way — a Hold cannot change a warn Standard's outcome — but a Hold sitting on
+	// a violation it does not affect is a lie waiting for the next reader.
+	for _, v := range result.Violations {
+		if len(v.Holds) != 0 {
+			t.Errorf("%s is advisory, yet carries %d hold(s): %+v", v.Standard, len(v.Holds), v.Holds)
+		}
 	}
 }
 

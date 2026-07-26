@@ -1,18 +1,19 @@
 # S2 — a Service Tier determines which Signals are mandatory.
 #
 # A Telemetry Contract declares a Service Tier; that tier fixes the Signals the
-# service must emit. Documented in docs/service-tiers.md.
+# service must emit.
+#
+# This policy does NOT define the taxonomy. It reads it from the data document
+# data.otel.taxonomy, which the Guardrail builds from guardrail/tiers.yaml — the
+# single source of truth shared with the Control Plane, which keys Pipeline
+# Profiles off the same identifiers (ADR 0005). Naming a tier here would create a
+# second definition that drifts silently, so a test asserts no .rego file
+# mentions one. Documented in docs/service-tiers.md.
 package otel.guardrail.standards.s2
 
-# The Service Tier taxonomy: tier identifier -> the Signals that tier mandates.
-# The higher the criticality, the more Signals are mandatory.
-mandatory_signals := {
-	"tier-1": {"traces", "metrics", "logs"},
-	"tier-2": {"traces", "metrics"},
-	"tier-3": {"traces"},
-}
+mandatory_signals := data.otel.taxonomy.mandatory_signals
 
-known_tiers := sort(object.keys(mandatory_signals))
+known_tiers := data.otel.taxonomy.known_tiers
 
 declared_signals := {signal | some signal in input.signals}
 
