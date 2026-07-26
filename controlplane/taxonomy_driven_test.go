@@ -143,16 +143,23 @@ func taxonomyFrom(t *testing.T, body string) *guardrail.Taxonomy {
 func profilesFor(t *testing.T, tiers ...string) *controlplane.ProfileSet {
 	t.Helper()
 
-	body := `apiVersion: guardrail.otel/v1
+	return profilesFrom(t, `apiVersion: guardrail.otel/v1
 kind: PipelineProfileSet
 profiles:
   - profile: under-test
-    tiers: [` + strings.Join(tiers, ", ") + `]
+    tiers: [`+strings.Join(tiers, ", ")+`]
     gateway_endpoint: gateway.test:4317
     batch:
       timeout: 5s
       send_batch_size: 8192
-`
+`)
+}
+
+// profilesFrom loads a Profile set written inline, so a test can retune a tier
+// and watch the compiled config follow.
+func profilesFrom(t *testing.T, body string) *controlplane.ProfileSet {
+	t.Helper()
+
 	path := filepath.Join(t.TempDir(), "profiles.yaml")
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatalf("write Profiles: %v", err)

@@ -2,19 +2,41 @@
 #
 # A Profile is the counterpart to a Telemetry Contract, and the split is strict:
 # the Contract says WHAT a service emits, a Profile says HOW it ships (batching,
-# sampling, where it forwards to). Which Signals a tier must emit is neither of
-# those — it is the Service Tier Taxonomy in guardrail/tiers.yaml, enforced by
-# Standard S2. All three are read at Compile time; none restates another.
+# delivery durability, memory limits, where it forwards to). Which Signals a tier
+# must emit is neither of those — it is the Service Tier Taxonomy in
+# guardrail/tiers.yaml, enforced by Standard S2. All three are read at Compile
+# time; none restates another.
 #
-# These configure a service's AGENT: receive OTLP, batch, forward to the Gateway.
-# An Agent does no enforcement and names no Backend (ADR 0007) — Backend fan-out
-# is the Gateway's job and lands with C5. A service never edits this: pipeline
-# shape is owned centrally per tier (ADR 0005).
+# These configure a service's AGENT: receive OTLP, limit memory, stamp the
+# Contract's resource attributes, batch, forward to the Gateway. An Agent does no
+# enforcement and names no Backend (ADR 0007) — Backend fan-out is the Gateway's
+# job and lands with C5. A service never edits this: pipeline shape is owned
+# centrally per tier (ADR 0005).
 #
-# C1 ships one Profile, for tier-1, which is the tracer bullet's scope. Compiling
-# a tier with no Profile is a loud error rather than a default, so the missing
-# tier-2 and tier-3 Profiles cannot silently produce a wrong pipeline. C2 (#11)
-# adds them with real per-tier sampling and batching.
+# Every tier in the taxonomy selects exactly one Profile here. A tier with none
+# fails to compile loudly rather than defaulting to a pipeline nobody chose.
+#
+# WHAT ACTUALLY DIFFERS PER TIER, and why:
+#
+#   batch.timeout          How long telemetry waits before shipping. Lower is
+#                          faster to appear during an incident; higher is cheaper
+#                          in requests. Criticality decides which matters more.
+#   memory_limit_mib       The Agent's memory ceiling. A tier-1 Agent sits beside
+#                          a latency-sensitive service and must never become the
+#                          reason it degrades.
+#   delivery.queue_size    How much telemetry the Agent holds when the Gateway is
+#                          unreachable, before dropping.
+#   delivery.retry         Whether to retry a failed export. Retrying protects
+#                          telemetry the org cannot lose; not retrying protects
+#                          the service from an Agent applying back-pressure over
+#                          telemetry nobody will read.
+#
+# Head sampling is deliberately absent from every Profile. The Gateway
+# tail-samples with the whole trace in hand (ADR 0007), and an Agent dropping
+# spans first would hand it broken traces. sampling.traces_percent below is the
+# GATEWAY's tail-sampling budget, owned here because it is a per-tier cost
+# decision — it is consumed when the Gateway config compiles (C5, #13), and is
+# not emitted into an Agent config.
 apiVersion: guardrail.otel/v1
 kind: PipelineProfileSet
 
@@ -22,13 +44,50 @@ profiles:
   - profile: tier-1-critical
     tiers: [tier-1]
     description: >-
-      Customer-facing services. Everything is kept: no head sampling, and small
-      batches so telemetry is visible quickly during an incident.
+      Customer-facing or revenue-critical. Telemetry must appear fast and must
+      not be lost: an incident here is visible outside the org.
     gateway_endpoint: otel-gateway.observability.svc.cluster.local:4317
+    memory_limit_mib: 512
     batch:
       timeout: 5s
       send_batch_size: 8192
+    delivery:
+      queue_size: 10000
+      retry: true
     sampling:
-      # Head sampling percentage at the Agent. 100 means the Agent decides
-      # nothing — the Gateway tail-samples with the whole trace in hand.
       traces_percent: 100
+
+  - profile: tier-2-supporting
+    tiers: [tier-2]
+    description: >-
+      Important internal or supporting services. Their degradation reaches other
+      teams, so telemetry is still durable — but seconds of extra latency cost
+      nothing, and larger batches cost less.
+    gateway_endpoint: otel-gateway.observability.svc.cluster.local:4317
+    memory_limit_mib: 256
+    batch:
+      timeout: 15s
+      send_batch_size: 8192
+    delivery:
+      queue_size: 5000
+      retry: true
+    sampling:
+      traces_percent: 50
+
+  - profile: tier-3-background
+    tiers: [tier-3]
+    description: >-
+      Batch jobs, tooling, low-traffic services. Efficiency over latency, and
+      never at the host's expense: no retry, because an Agent applying
+      back-pressure to a batch job over telemetry nobody is waiting on is a worse
+      outcome than losing the telemetry.
+    gateway_endpoint: otel-gateway.observability.svc.cluster.local:4317
+    memory_limit_mib: 128
+    batch:
+      timeout: 30s
+      send_batch_size: 16384
+    delivery:
+      queue_size: 1000
+      retry: false
+    sampling:
+      traces_percent: 10

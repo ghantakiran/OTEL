@@ -36,16 +36,43 @@ kind: PipelineProfileSet
 profiles:
   - profile: tier-1-critical
     tiers: [tier-1]
-    description: Customer-facing services. Everything is kept.
+    description: Customer-facing services. Telemetry must appear fast and must not be lost.
     gateway_endpoint: otel-gateway.observability.svc.cluster.local:4317
+    memory_limit_mib: 512
     batch:
       timeout: 5s
       send_batch_size: 8192
+    delivery:
+      queue_size: 10000
+      retry: true
     sampling:
       traces_percent: 100
 ```
 
 A Service Tier selects exactly one Profile. Two Profiles claiming one tier is refused: pipeline shape would depend on file order.
+
+## What differs per tier, and why
+
+Every tier has a default Profile, and they are not three copies of one pipeline. Criticality decides four things:
+
+| | `tier-1` | `tier-2` | `tier-3` |
+| --- | --- | --- | --- |
+| `batch.timeout` | 5s | 15s | 30s |
+| `memory_limit_mib` | 512 | 256 | 128 |
+| `delivery.queue_size` | 10000 | 5000 | 1000 |
+| `delivery.retry` | yes | yes | **no** |
+
+- **Batch timeout** trades latency against cost. Tier-1 telemetry needs to be visible while an incident is happening; a batch job's does not.
+- **Memory limit** — an Agent runs *beside* the service it collects from. A tier-1 Agent must never become the reason a latency-sensitive service degrades, so the ceiling is a per-tier decision rather than a global default.
+- **Delivery** is the sharpest difference. Retrying protects telemetry the org cannot lose. **Not** retrying protects the service: an Agent applying back-pressure to a batch job, over telemetry nobody is waiting on, is a worse outcome than losing the telemetry. That is why `tier-3` sets `retry: false`.
+
+A setting that would do nothing is not emitted. A Profile with no `delivery` and no `memory_limit_mib` compiles a config with no `sending_queue`, no `retry_on_failure` and no `memory_limiter` — rather than a disabled block that invites the next reader to think it is doing something.
+
+## Head sampling is deliberately absent
+
+No Profile does head sampling at the Agent. The Gateway tail-samples with the whole trace in hand (ADR 0007), and an Agent dropping spans first would hand it broken traces.
+
+`sampling.traces_percent` is therefore the **Gateway's** tail-sampling budget for that tier — a per-tier cost decision the Profile owns, consumed when the Gateway config compiles (C5, #13). Nothing in an Agent config is derived from it today.
 
 ## What refuses to compile
 
@@ -60,7 +87,9 @@ Compile stops rather than guessing, because each of these would otherwise put a 
 
 ## Which tiers can be compiled today
 
-**`tier-1` only.** C1 (#9) is the tracer bullet: one Profile, one tier, end to end. `tier-2` and `tier-3` are real Service Tiers with no Profile yet, so they fail to compile with a message saying exactly that — which is the intended state, not a gap that silently produces something wrong. C2 (#11) adds them with real per-tier sampling and batching.
+**All of them.** Every Service Tier in the taxonomy selects a default Profile, so `compile` behaves uniformly across tiers — a test walks the taxonomy and asserts exactly that.
+
+A tier that exists in the taxonomy but has no Profile — the state a tier is in between being added and having its pipeline shape decided — still fails to compile, naming itself. That is the intended behaviour, not a gap: a default there would be a pipeline nobody chose.
 
 ## Validation
 

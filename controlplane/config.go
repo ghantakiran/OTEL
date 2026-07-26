@@ -41,10 +41,11 @@ type Pipeline struct {
 // attributes the Contract declares, and forwards to the Gateway — it names no
 // Backend and does no enforcement (ADR 0007).
 const (
-	otlpReceiver      = "otlp"
-	batchProcessor    = "batch"
-	resourceProcessor = "resource"
-	gatewayExporter   = "otlp/gateway"
+	otlpReceiver           = "otlp"
+	batchProcessor         = "batch"
+	resourceProcessor      = "resource"
+	memoryLimiterProcessor = "memory_limiter"
+	gatewayExporter        = "otlp/gateway"
 )
 
 // assemble builds the config from the three inputs. Kept separate from Compile so
@@ -70,19 +71,52 @@ func assemble(c contract.Contract, profile Profile, signals []contract.Signal) C
 			resourceProcessor: map[string]any{"attributes": resourceAttributes(c)},
 		},
 		Exporters: map[string]any{
-			gatewayExporter: map[string]any{"endpoint": profile.GatewayEndpoint},
+			gatewayExporter: gatewayExport(profile),
 		},
 		Service: CollectorService{Pipelines: map[string]Pipeline{}},
+	}
+
+	// An Agent runs beside the service it collects from. A memory ceiling is what
+	// keeps it from becoming the reason that service degrades, so the limit is a
+	// per-tier decision rather than a global default.
+	processors := []string{resourceProcessor, batchProcessor}
+	if profile.MemoryLimitMiB > 0 {
+		config.Processors[memoryLimiterProcessor] = map[string]any{
+			"limit_mib":      profile.MemoryLimitMiB,
+			"check_interval": "1s",
+		}
+		// First in the chain: a limiter that runs after batching has already let the
+		// memory it was meant to cap be allocated.
+		processors = append([]string{memoryLimiterProcessor}, processors...)
 	}
 
 	for _, signal := range signals {
 		config.Service.Pipelines[string(signal)] = Pipeline{
 			Receivers:  []string{otlpReceiver},
-			Processors: []string{resourceProcessor, batchProcessor},
+			Processors: processors,
 			Exporters:  []string{gatewayExporter},
 		}
 	}
 	return config
+}
+
+// gatewayExport is the OTLP exporter aimed at the Gateway, with the durability
+// the tier's Profile asks for. Retry is off by default in the collector, so the
+// Profile saying retry: false means the block is simply absent — the compiled
+// config never carries a setting that does nothing.
+func gatewayExport(profile Profile) map[string]any {
+	exporter := map[string]any{"endpoint": profile.GatewayEndpoint}
+
+	if profile.Delivery.QueueSize > 0 {
+		exporter["sending_queue"] = map[string]any{
+			"enabled":    true,
+			"queue_size": profile.Delivery.QueueSize,
+		}
+	}
+	if profile.Delivery.Retry {
+		exporter["retry_on_failure"] = map[string]any{"enabled": true}
+	}
+	return exporter
 }
 
 // resourceAttributes is the Contract's resource attributes as collector upsert

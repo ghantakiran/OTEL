@@ -85,16 +85,27 @@ func TestCompileRefusesAServiceTierOutsideTheTaxonomy(t *testing.T) {
 }
 
 func TestCompileRefusesATierWithNoPublishedPipelineProfile(t *testing.T) {
-	// tier-3 is a real Service Tier with no Profile yet — C1 ships one, for tier-1.
-	// How its telemetry ships is undecided, and a default would put a pipeline on
-	// the fleet that nobody chose.
+	// Every tier the org ships now has a Profile (C2), so this needs a tier that
+	// genuinely has none: one the taxonomy defines and the Profiles do not cover.
+	// That is the state a tier is in between being added to the taxonomy and having
+	// its pipeline shape decided, and compiling then would put a pipeline on the
+	// fleet that nobody chose.
+	taxonomyKnowingAnExtraTier := taxonomyFrom(t, `apiVersion: guardrail.otel/v1
+kind: ServiceTierTaxonomy
+tiers:
+  - tier: tier-unprofiled
+    criticality: Added to the taxonomy before its pipeline shape was decided.
+    mandatory_signals: [traces]
+`)
 	unprofiled := tierOneService()
-	unprofiled.Tier = "tier-3"
+	unprofiled.Tier = "tier-unprofiled"
 	unprofiled.Signals = []string{"traces"}
 
-	err := mustNotCompile(t, unprofiled, "tier-3 has no Pipeline Profile")
-
-	if !strings.Contains(err.Error(), "tier-3") || !strings.Contains(strings.ToLower(err.Error()), "profile") {
+	_, err := controlplane.Compile(unprofiled, taxonomyKnowingAnExtraTier, profiles(t))
+	if err == nil {
+		t.Fatal("a Contract on a tier with no Pipeline Profile compiled anyway")
+	}
+	if !strings.Contains(err.Error(), "tier-unprofiled") || !strings.Contains(strings.ToLower(err.Error()), "profile") {
 		t.Errorf("the error does not say which tier lacks a Profile: %v", err)
 	}
 }
