@@ -48,6 +48,18 @@ _Avoid_: Config template, preset, pipeline config
 The Control Plane action of combining a Telemetry Contract (what to emit) with its tier's Pipeline Profile (how to ship it) to produce a service's collector configuration.
 _Avoid_: Generate, render, build
 
+**Fleet**:
+The set of services whose Telemetry Contracts the Control Plane Compiles together — one Contract per service, gathered in the config repo and filed under the service's own name. A Fleet is the unit a Rollout covers.
+_Avoid_: Estate, inventory, all services, cluster
+
+**Rollout**:
+One fleet-wide Compile, committed to git and applied to the Agents and the Gateway by existing GitOps tooling. Reconfiguring the fleet is a commit plus a normal rollout, never a push from a server (ADR 0006) — so a Rollout is something a human reviews as a diff before it reaches anything.
+_Avoid_: Deploy, push, sync, apply
+
+**Rollout Manifest**:
+The committed index of one Rollout: every service in the Fleet, whether its collector configuration Compiled, and the reason it did not. It exists because a diff shows what changed and never what is absent — without it, a Rollout covering only part of the Fleet would be invisible to the reviewer.
+_Avoid_: Index, lockfile, status file, report
+
 **Agent**:
 A lightweight collector running next to a service (sidecar or node daemon) that collects telemetry and forwards it to the Gateway. Agents do no enforcement.
 _Avoid_: Collector (bare), sidecar, node collector
@@ -131,6 +143,8 @@ _Avoid_: Cutoff, go-live, launch date
 - A **Waiver** exempts one service from one **Standard** until it expires.
 - The **Control Plane** **Compiles** a **Telemetry Contract** with its tier's **Pipeline Profile** into collector configuration.
 - Each **Service Tier** selects a default **Pipeline Profile**; a platform-approved override may assign a different one.
+- The **Control Plane** **Compiles** a whole **Fleet** into a **Rollout**, indexed by a **Rollout Manifest**; merging that commit *is* the rollout.
+- A **Telemetry Contract** that does not **Compile** is recorded in the **Rollout Manifest** and keeps whatever collector configuration it last compiled to — it is skipped, never guessed at and never silently dropped.
 - An **Agent** forwards to a **Gateway**; the **Gateway** hosts **Pipeline Guardrails**.
 - A **Gateway** fans out to one or more **Backends**, defined in the **Pipeline Profile**; a service never targets a **Backend** directly.
 

@@ -1,0 +1,21 @@
+# A Telemetry Contract in the sample fleet — see contracts/orders-api.yaml for what
+# this directory is and how it differs from guardrail/examples/.
+#
+# Second tier-1 service, so the compiled tree shows more than one and a rollout diff
+# has something to be narrow about: changing this Contract must touch
+# compiled/payments-api.yaml and nothing else.
+apiVersion: guardrail.otel/v1
+kind: TelemetryContract
+service_name: payments-api
+owner: team-payments
+tier: tier-1
+signals:
+  - traces
+  - metrics
+  - logs
+resource_attributes:
+  service.name: payments-api
+  service.version: "2.4.1"
+  deployment.environment: production
+  service.namespace: payments
+  service.instance.id: payments-api-7d9f4b

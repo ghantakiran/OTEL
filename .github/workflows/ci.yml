@@ -26,9 +26,58 @@ jobs:
       # The Waiver-expiry cron's open/update/close branching is bash, so `go
       # test` cannot reach it. Stubs `gh`; creates no issues and needs no auth.
       - run: bash .github/scripts/waiver-expiry-issue_test.sh
+      # Same for the fleet-rollout cron's two halves: which exit code means "propose
+      # nothing", and the open/update/close/do-nothing branching around the PR.
+      # Stubs `gh` and pushes to a bare repo in a temp directory; creates nothing.
+      - run: bash .github/scripts/gitops-rollout-compile_test.sh
+      - run: bash .github/scripts/gitops-rollout-pr_test.sh
       # The worked examples in docs/ are executable promises. Three of four had
       # gone stale before anyone noticed, because prose has no test.
       - run: bash .github/scripts/docs-examples_test.sh
+
+  fleet-up-to-date:
+    name: The committed collector configuration is what the Contracts compile to
+    # Pull requests only, deliberately. On master the scheduled rollout job is what
+    # closes a gap: a Pipeline Profile can merge before the fleet is recompiled, and
+    # that leaves master briefly behind — which is a pull request waiting to be
+    # reviewed, not a broken build. On a pull request it is a different thing: the
+    # author is changing an input and can recompile in the same change, so the
+    # Contract or Profile and the collector configuration it produces land together
+    # instead of a day apart.
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      # No history needed: compiling never dates a service from git, unlike `check`.
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go build -o "$RUNNER_TEMP/otel-guardrail" ./guardrail/cmd/otel-guardrail
+
+      - name: Recompile the Fleet
+        env:
+          FLEET: fleet
+        run: |
+          GUARDRAIL="$RUNNER_TEMP/otel-guardrail" \
+          REPORT="$RUNNER_TEMP/fleet-rollout.json" \
+            .github/scripts/gitops-rollout-compile.sh
+
+      - name: Nothing changed, because it was already committed
+        run: |
+          set -euo pipefail
+
+          # --porcelain and not `git diff`: a service added to the Fleet in this pull
+          # request produces an untracked compiled config, which a diff does not see.
+          drift="$(git status --porcelain -- fleet)"
+          if [ -z "$drift" ]; then
+            echo "the compiled collector configuration matches the Telemetry Contracts"
+            exit 0
+          fi
+
+          echo "::error title=The compiled collector configuration is out of date::This pull request changes a Telemetry Contract or a Pipeline Profile without the collector configuration it compiles to. Run 'otel-guardrail compile-fleet fleet' and commit the result, so the input and the output land together."
+          echo "$drift"
+          git --no-pager diff -- fleet
+          exit 1
 
   guardrail-examples:
     name: Preflight Guardrail blocks what it should

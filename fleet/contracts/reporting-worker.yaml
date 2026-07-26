@@ -1,0 +1,29 @@
+# A Telemetry Contract in the sample fleet — see contracts/orders-api.yaml for what
+# this directory is and how it differs from guardrail/examples/.
+#
+# This one does not compile today, and that is the live state of the platform rather
+# than a fixture: tier-2 is a real Service Tier with no Pipeline Profile published
+# yet, so how its telemetry ships is undecided, and compile-fleet refuses to invent
+# a pipeline nobody chose. The refusal is recorded in rollout-manifest.yaml under
+# not_compiled, and compile-fleet exits 1.
+#
+# This is deliberately NOT a permanent failure. C2 (#11) publishes the tier-2 and
+# tier-3 Profiles; the moment it lands, this Contract compiles, the scheduled rollout
+# job sees the compiled tree no longer match the Contracts, and opens the pull request
+# that adds compiled/reporting-worker.yaml. A Contract left failing here forever would
+# train reviewers to skim past the not_compiled section, which is the same failure as
+# an alert nobody reads.
+apiVersion: guardrail.otel/v1
+kind: TelemetryContract
+service_name: reporting-worker
+owner: team-analytics
+tier: tier-2
+signals:
+  - traces
+  - metrics
+resource_attributes:
+  service.name: reporting-worker
+  service.version: "0.9.3"
+  deployment.environment: production
+  service.namespace: analytics
+  service.instance.id: reporting-worker-b32f01

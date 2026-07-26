@@ -1,0 +1,30 @@
+# A Telemetry Contract in the SAMPLE FLEET.
+#
+# This directory is the fleet the Control Plane compiles and commits — the config
+# repo of ADR 0006, standing in for one until real service repos feed it. Every
+# Contract here is meant to compile. That is what separates it from
+# guardrail/examples/, where several Contracts deliberately violate a Standard so
+# that CI can prove the Preflight Guardrail blocks them.
+#
+# The same separation as guardrail/examples/demo-waivers.yaml versus the live
+# guardrail/waivers.yaml, and for the same reason: a fixture that must stay broken
+# and an artefact that must stay correct cannot be the same file.
+#
+# Filed under its own service name: contracts/orders-api.yaml declares orders-api
+# and compiles to compiled/orders-api.yaml. compile-fleet refuses to guess if those
+# disagree.
+apiVersion: guardrail.otel/v1
+kind: TelemetryContract
+service_name: orders-api
+owner: team-fulfilment
+tier: tier-1
+signals:
+  - traces
+  - metrics
+  - logs
+resource_attributes:
+  service.name: orders-api
+  service.version: "5.1.0"
+  deployment.environment: production
+  service.namespace: fulfilment
+  service.instance.id: orders-api-4c1e8a
