@@ -35,6 +35,8 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		return runCheck(args[1:], stdout, stderr)
 	case "waivers":
 		return runWaivers(args[1:], stdout, stderr)
+	case "compile":
+		return runCompile(args[1:], stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "unknown command %q\n\n%s\n", args[0], usage)
 		return exitError
@@ -47,6 +49,8 @@ Commands:
   check     Run the Preflight Guardrail over a service's Telemetry Contract.
   waivers   Report Waivers that have expired or are about to. Run
             'otel-guardrail waivers --help' for its flags.
+  compile   Compile a Telemetry Contract with its tier's Pipeline Profile into
+            collector configuration. Run 'otel-guardrail compile --help'.
 
 otel-guardrail check [--waivers <waivers.yaml>] [--enforcement <enforcement.yaml>]
                      [--as-of <YYYY-MM-DD>] <telemetry-contract.yaml>
