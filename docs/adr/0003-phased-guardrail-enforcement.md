@@ -20,14 +20,23 @@ Each Standard carries a Severity (`info` / `warn` / `block`); only `block` fails
 - **A waived violation is still reported.** It keeps its declared `block` Severity in the output and gains the approver and expiry date on the same line; only `Result.FailsTheBuild` changes its answer. A Waiver whose violation vanishes from CI output is one nobody retires — the permanent hole this ADR exists to avoid.
 - **"Now" is injected, never read from the wall clock inside the expiry logic.** The Guardrail takes a `Clock` (`WithClock`); `WaiverRegister.InForce` and `Waiver.DaysUntilExpiry` take the day to judge as a parameter. Tests fix the day, `otel-guardrail check --as-of` lets an operator ask what a build will do on a future day, and the expiry report reuses the same seam.
 
-Still not built: new-vs-legacy classification by Enforcement Epoch, and the report of soon-to-expire Waivers. Neither changes the rule that only `block` fails a build.
+**Amended (G5, #7)**: the Enforcement Epoch is built, closing the "new vs legacy needs a definition" gap below. One published date in `guardrail/enforcement.yaml` classifies every service; a legacy service is held back from a blocking Standard until that Standard's published graduation deadline, then blocks unattended. Three supporting decisions:
+
+- **A service is dated by the first git commit that added its Telemetry Contract, never by a field it declares.** Git is the source of truth (ADR 0004), so the date is neither the service team's to write down nor theirs to backdate, and deleting and re-declaring a Contract does not reset the clock. A `first_declared:` field in the Contract was rejected: the entire value of the Epoch is that no team has to be trusted about its own age, and a self-declared date is a one-line way to buy warn-only treatment.
+- **Undeterminable history stops the run (exit 2); it does not fall back to a default.** `actions/checkout` clones shallow by default, which leaves nothing to read. Guessing *new* would fail every legacy service the moment somebody shallow-clones — the political death this ADR exists to avoid; guessing *legacy* would hand every service a trivial escape from blocking — the permanent hole it also exists to avoid. Consumers set `fetch-depth: 0`; the action cannot do it for them, because the Contract lives in the *caller's* checkout.
+- **A blocking Standard with no published graduation deadline is an error, not a default**, for the same symmetry: one default makes the rollout permanent for that Standard, the other springs it on every legacy service at once. The platform team publishes the day. This bites only when a legacy service actually violates that Standard, so authoring a new Standard does not stop the fleet.
+
+The Epoch and a Waiver compose without either masking the other: both can hold one violation back, they lapse on different days, and the report names both — a service told about only one is told the wrong date.
+
+Still not built: the report of soon-to-expire Waivers. It does not change the rule that only `block` fails a build.
 
 ## Consequences
 
 - Adoption is gradual and political friction is bounded; compliance still trends up because warn has a deadline and waivers expire.
 - The system must track waiver expiry and surface soon-to-expire and expired waivers, or the escape hatch becomes a permanent hole. Half of this is now in place: expiry is enforced automatically and every waived violation is printed on every run with its expiry date. The *soon-to-expire* report is still outstanding, and builds on `Waiver.DaysUntilExpiry`.
 - Embedding the register in the binary means an approved Waiver takes effect in a service repo only when that repo's pinned `guardrail-ref` moves forward — the same latency a Standards change already has. Accepted: it is one distribution mechanism instead of two, and a service pinning an old ref gets an old Waiver *and* old Standards together, which is at least coherent.
-- "New vs legacy service" needs a definition (e.g. first-seen date) so the engine knows which Severity to apply.
+- "New vs legacy service" is now defined: the first git commit that added the Telemetry Contract, against a published Enforcement Epoch. The cost is that the Preflight Guardrail needs real git history at check time, so every consumer's checkout must be unshallow — a requirement that is invisible until it bites, which is why it fails loudly with an actionable message rather than defaulting.
+- Every Standard that can block now carries an obligation the catalog cannot satisfy alone: a graduation deadline published in the enforcement schedule. Authoring a Standard is therefore a two-file change, and forgetting the second file is caught the first time a legacy service violates it.
 
 ## Considered alternatives
 
