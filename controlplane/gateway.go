@@ -4,6 +4,7 @@ import (
 	_ "embed"
 	"fmt"
 	"os"
+	"slices"
 
 	"gopkg.in/yaml.v3"
 
@@ -31,6 +32,17 @@ type GatewayDeclaration struct {
 	MemoryLimitMiB int `yaml:"memory_limit_mib"`
 	// Batch is how telemetry is regrouped on the way out to a Backend.
 	Batch Batch `yaml:"batch"`
+	// SpillRoot is the directory the Gateway's persistent sending queues spill to.
+	// It is a Gateway fact — one volume, mounted once — while WHETHER a given
+	// Backend spills is that Backend's own durability decision, so the two sit in
+	// different places (the split ADR 0013 draws).
+	//
+	// Each spilling Backend gets its own subdirectory under this, named after it.
+	// Deriving rather than declaring the directory is what makes two Backends
+	// sharing one storage instance unrepresentable: sharing would give them one
+	// file lock, one disk budget and one corruption blast radius, re-coupling the
+	// Backends through the mechanism meant to decouple them.
+	SpillRoot string `yaml:"spill_root"`
 	// Backends are where telemetry lands. Declared here and nowhere else, which is
 	// what makes a service Backend-agnostic (ADR 0007).
 	Backends []Backend `yaml:"backends"`
@@ -38,18 +50,44 @@ type GatewayDeclaration struct {
 
 // Backend is one destination the Gateway exports to, reached over OTLP.
 //
-// OTLP rather than a vendor-specific exporter keeps the compiled config to the
-// collector's core distribution: a Splunk or Datadog exporter would pull in the
-// contrib distribution, which C1 and C2 deliberately avoided. A Backend that
-// speaks only a proprietary protocol is therefore an explicit decision to take,
-// not something that happens by accident.
+// OTLP rather than a vendor-specific exporter, and the Backend is named for the
+// ROLE it fills rather than the product filling it. Both keep the vendor out of
+// the compiled config, out of git history, and out of the exporter IDs the
+// platform's own metrics are labelled by — so swapping a Backend stays one edit
+// to one file (ADR 0007) rather than a rename across all of it. A Backend that
+// speaks only a proprietary protocol is an explicit decision to take, not
+// something that happens by accident.
+//
+// Each Backend compiles to its OWN exporter with its own queue, its own retry and
+// its own spill storage. Nothing is shared between two of them: a shared queue is
+// what makes one slow Backend everyone's outage, and a shared storage instance
+// would re-couple them a layer down (ADR 0010, ADR 0014).
 type Backend struct {
 	Name        string `yaml:"backend"`
 	Description string `yaml:"description"`
 	Endpoint    string `yaml:"endpoint"`
+	// Signals are the Signals this Backend receives. Empty means every Signal — a
+	// Backend takes the whole stream unless it says otherwise, which is what an APM
+	// does and what the one-Backend Gateway did before fan-out.
+	//
+	// A metrics store is not a trace store, so this is not cosmetic: exporting a
+	// Signal a Backend rejects produces export failures indistinguishable from that
+	// Backend being down.
+	Signals []string `yaml:"signals"`
 	// Delivery is per Backend, not per Gateway: one slow or unreachable Backend
 	// must not block exports to the others (ADR 0010).
 	Delivery Delivery `yaml:"delivery"`
+}
+
+// Receives reports whether this Backend takes a Signal. An omitted `signals:` —
+// a nil slice — is every Signal. An empty list written out is refused at compile
+// rather than reaching here, since "none" read as "everything" would be the widest
+// gap possible between what was written and what runs.
+func (b Backend) Receives(signal contract.Signal) bool {
+	if b.Signals == nil {
+		return true
+	}
+	return slices.Contains(b.Signals, string(signal))
 }
 
 type gatewayDocument struct {

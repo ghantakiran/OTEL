@@ -54,6 +54,12 @@ type Delivery struct {
 	QueueSize int `yaml:"queue_size"`
 	// Retry is whether a failed export is retried.
 	Retry bool `yaml:"retry"`
+	// Spill makes the queue persistent: it is written to disk, so it survives the
+	// collector restarting while the next hop is still down. Only a Backend sets
+	// it — a persistent queue needs a storage extension, which is the collector's
+	// contrib distribution rather than core (ADR 0014), and an Agent runs beside a
+	// service on whatever disk that service has. Its queue stays in memory.
+	Spill bool `yaml:"spill"`
 }
 
 // Batch is how telemetry is grouped before it leaves the Agent.
@@ -63,13 +69,21 @@ type Batch struct {
 }
 
 // Sampling is the GATEWAY's tail-sampling budget for this tier — a per-tier cost
-// decision the Profile owns, consumed when tail sampling lands (C5, #13). It stays
-// here rather than in the Gateway Declaration precisely because it varies by tier,
-// which is the line ADR 0013 draws between the two documents.
+// decision the Profile owns. It stays here rather than in the Gateway Declaration
+// precisely because it varies by tier, which is the line ADR 0013 draws between
+// the two documents.
 //
 // It is deliberately not head sampling at the Agent: the Gateway tail-samples
 // with the whole trace in hand (ADR 0007), and an Agent dropping spans first
 // would hand it broken traces. Nothing in an Agent config is derived from this.
+//
+// NOTHING READS IT YET, and #40 is where that is tracked. C5 (#13) built the
+// Gateway's fan-out and deferred tail sampling deliberately: the blocker is not
+// the processor but that the Gateway cannot tell Service Tiers apart at run time
+// — no Contract stamps a tier attribute, so a per-tier policy has nothing to key
+// on (the consequence ADR 0013 flagged). #40 either closes that or deletes this
+// field; a setting nobody reads is worse than no setting, because it reads as
+// working.
 type Sampling struct {
 	TracesPercent int `yaml:"traces_percent"`
 }
@@ -134,6 +148,15 @@ func parseProfileSet(data []byte, origin string) (*ProfileSet, error) {
 		}
 		if len(profile.Tiers) == 0 {
 			return nil, fmt.Errorf("Pipeline Profiles %s: Profile %q is selected by no Service Tier, so nothing would ever compile with it", origin, profile.Name)
+		}
+		// `delivery` is shared by a Profile and a Backend, but `spill` belongs to the
+		// Backend alone: it needs a storage extension from the collector's contrib
+		// distribution, and the Agent stays core-only (ADR 0014). Nothing compiles it
+		// into an Agent config — which is precisely why writing it here has to fail
+		// rather than be ignored. Silently dropping it would leave a Profile that
+		// reads as durable in every review while the fleet runs an in-memory queue.
+		if profile.Delivery.Spill {
+			return nil, fmt.Errorf("Pipeline Profiles %s: Profile %q asks its Agents to spill, but spill is a Backend's setting and nothing compiles it into an Agent — the Agent stays on the collector's core distribution (ADR 0014), so remove `spill:` here and set it on a Backend in the Gateway Declaration", origin, profile.Name)
 		}
 
 		set.order = append(set.order, profile.Name)

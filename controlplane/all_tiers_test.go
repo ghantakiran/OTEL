@@ -1,6 +1,8 @@
 package controlplane_test
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -162,6 +164,45 @@ profiles:
 	}
 	if err := config.Validate(); err != nil {
 		t.Errorf("a minimal Profile compiled an incoherent config: %v", err)
+	}
+}
+
+func TestAPipelineProfileCannotAskAnAgentToSpill(t *testing.T) {
+	// `delivery` is shared by a Profile (the Agent-to-Gateway hop) and a Backend
+	// (the Gateway-to-Backend hop), but `spill` belongs only to the second: it needs
+	// a storage extension from the collector's contrib distribution, and the Agent
+	// stays core-only (ADR 0014). Nothing compiles it into an Agent config.
+	//
+	// Which is exactly why writing it has to fail here. A Profile that carries
+	// `spill: true` and is silently ignored reads as durable in every review and is
+	// a plain in-memory queue on the fleet — the failure the Sampling comment in
+	// profile.go names, a setting nobody reads being worse than no setting.
+	path := filepath.Join(t.TempDir(), "profiles.yaml")
+	if err := os.WriteFile(path, []byte(`apiVersion: guardrail.otel/v1
+kind: PipelineProfileSet
+profiles:
+  - profile: durable-agent
+    tiers: [tier-1]
+    gateway_endpoint: gateway.test:4317
+    batch:
+      timeout: 5s
+      send_batch_size: 8192
+    delivery:
+      queue_size: 10000
+      retry: true
+      spill: true
+`), 0o600); err != nil {
+		t.Fatalf("write Profiles: %v", err)
+	}
+
+	_, err := controlplane.LoadProfiles(path)
+	if err == nil {
+		t.Fatal("a Pipeline Profile asking an Agent to spill loaded, and nothing compiles it — the Profile reads as durable and the Agent's queue is in memory")
+	}
+	for _, want := range []string{"durable-agent", "spill"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the error does not mention %q: %v", want, err)
+		}
 	}
 }
 

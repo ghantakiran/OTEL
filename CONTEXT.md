@@ -69,11 +69,19 @@ The central collector tier that receives from Agents, batches, tail-samples, and
 _Avoid_: Central collector, aggregator, proxy
 
 **Backend**:
-A destination system where telemetry lands (e.g. Splunk, a metrics store, a cold archive). The Gateway fans out to one or more Backends per the Gateway Declaration; services never target a Backend directly.
-_Avoid_: APM, sink, store, destination
+A destination system where telemetry lands. The Gateway fans out to one or more Backends per the Gateway Declaration; services never target a Backend directly. A Backend is named for the **role** it fills — `primary-apm`, `metrics-store`, `cold-archive` — never the product filling it, so swapping the product stays one edit to one file. It declares which Signals it receives and its own durability, and compiles to its own exporter, isolated from every other Backend's.
+_Avoid_: APM, sink, store, destination; and any vendor's name
+
+**Backend Isolation**:
+The property that no two Backends share anything that would let one stall the others: each has its own exporter, its own sending queue, its own retry, and — when it Spills — its own storage on its own directory. It is the reason to fan out from one Gateway rather than several, and it is enforced by construction: the storage and directory are derived from the Backend's name, and two Backends cannot share a name.
+_Avoid_: Independence, decoupling, per-backend config
+
+**Spill**:
+Keeping a Backend's sending queue on disk rather than in memory, so telemetry queued for a Backend that is not answering survives the Gateway restarting. Declared per Backend; each Spilling Backend writes to its own directory under the Gateway's one spill root. It is the single reason the Gateway runs the collector's contrib distribution rather than core (ADR 0014).
+_Avoid_: Disk buffer, persistence, dead-letter queue, overflow
 
 **Gateway Declaration**:
-The org's single description of the shared Gateway — the address Agents reach it on, how it rebatches, and which Backends it exports to. There is exactly one, because there is exactly one Gateway tier: unlike a Pipeline Profile it is neither per service nor per tier, and nothing selects it. Facts that genuinely vary by Service Tier (the tail-sampling budget) stay in the Profile.
+The org's single description of the shared Gateway — the address Agents reach it on, how it rebatches, where it Spills to, and which Backends it exports to. There is exactly one, because there is exactly one Gateway tier: unlike a Pipeline Profile it is neither per service nor per tier, and nothing selects it. Facts that genuinely vary by Service Tier (the tail-sampling budget) stay in the Profile.
 _Avoid_: Gateway Profile, gateway config, gateway manifest
 
 ### Guardrails
@@ -151,6 +159,9 @@ _Avoid_: Cutoff, go-live, launch date
 - A **Telemetry Contract** that does not **Compile** is recorded in the **Rollout Manifest** and keeps whatever collector configuration it last compiled to — it is skipped, never guessed at and never silently dropped.
 - An **Agent** forwards to a **Gateway**; the **Gateway** hosts **Pipeline Guardrails**.
 - A **Gateway** fans out to one or more **Backends**, defined in the **Gateway Declaration**; a service never targets a **Backend** directly.
+- A **Backend** receives only the **Signals** it declares, so a metrics store is absent from the traces pipeline; a **Signal** no **Backend** receives does not **Compile**.
+- **Backend Isolation** is what makes fanning out from one **Gateway** safe: a **Backend** that stops answering fills its own queue and **Spills** to its own directory, and the others keep exporting.
+- **Spill** is the one thing on this platform that is not in the collector's core distribution, so the **Gateway** runs a contrib build while every **Agent** stays core.
 - The **Control Plane** **Compiles** the **Gateway Declaration** into the **Gateway**'s configuration, cross-checked against every **Pipeline Profile**: the address the Gateway answers on must be where the Profiles forward **Agents**.
 
 ## Example dialogue

@@ -12,8 +12,8 @@
 # would describe three Gateways, and the org runs one; merging them would give the
 # Gateway's shape no owner. So the Gateway's own shape is declared once, here
 # (ADR 0013), while facts that are genuinely per-tier stay in the Profile — the
-# tail-sampling budget `sampling.traces_percent` is the standing example, consumed
-# when tail sampling lands (C5, #13).
+# tail-sampling budget `sampling.traces_percent` is the standing example, and
+# nothing reads it yet (#40).
 #
 # Compiling cross-checks the two: every Profile's `gateway_endpoint` must be the
 # `address` below. An Agent forwarding to a port the Gateway does not listen on is
@@ -31,15 +31,42 @@
 #   batch             How telemetry is regrouped on the way out. Agents batch per
 #                     service; the Gateway rebatches across all of them, which is
 #                     the point of having a Gateway at all.
+#   spill_root        The volume persistent sending queues are written to. One
+#                     mount, so it is a Gateway fact — whereas WHETHER a Backend
+#                     spills is that Backend's durability decision, below. Each
+#                     spilling Backend gets its own subdirectory here, named after
+#                     it; the directory is derived rather than declared so that two
+#                     Backends sharing one storage instance — one file lock, one
+#                     disk budget, one corruption blast radius — cannot be written.
 #   backends          Where telemetry lands. Declared here and nowhere else, which
 #                     is what "services are Backend-agnostic" means in practice
 #                     (ADR 0007): adding or swapping a Backend touches this file,
 #                     not the fleet.
 #
-# `delivery` is per Backend, not per Gateway, deliberately: one slow or unreachable
-# Backend must not block exports to the others (ADR 0010). Today exactly one
-# Backend compiles — fan-out to several lands with C5 (#13) — and a second entry
-# here is refused loudly rather than silently ignored.
+# THE BACKENDS ARE ROLE-NAMED, NOT VENDOR-NAMED. `primary-apm` is a role the org
+# fills with some product; the day it is filled with a different one, this file
+# changes and nothing else does. A `backend: splunk` here would put a vendor's name
+# in the compiled config of every Gateway, in git history, and in the exporter IDs
+# that C7's self-observation metrics are labelled by — and a Splunk migration would
+# then be a rename across all of it. Services are Backend-agnostic (ADR 0007); so
+# is this repository.
+#
+# EACH BACKEND IS ISOLATED FROM THE OTHERS. That is the whole point of fanning out
+# from one place. `delivery` is per Backend, never per Gateway, so each compiles to
+# its own exporter with its own sending queue, its own retry, and — when it spills
+# — its own storage extension on its own directory (ADR 0010). One shared queue is
+# exactly what makes one slow Backend everyone's outage; one shared storage
+# instance would re-couple them again a layer down.
+#
+#   queue_size   How much this Backend's telemetry the Gateway holds while it is
+#                not answering, before dropping. Sized by what the org would rather
+#                lose.
+#   retry        Whether a failed export to it is retried.
+#   spill        Whether that queue is written to disk instead of held in memory,
+#                so it survives the Gateway restarting while this Backend is down.
+#                It needs a storage extension, which is the collector's contrib
+#                distribution rather than core — a real, durable constraint on
+#                which collector build a Gateway runs (ADR 0014).
 apiVersion: guardrail.otel/v1
 kind: GatewayDeclaration
 
@@ -49,12 +76,43 @@ gateway:
   batch:
     timeout: 5s
     send_batch_size: 8192
+  spill_root: /var/lib/otelcol/spill
   backends:
     - backend: primary-apm
       description: >-
-        The org's primary APM Backend, reached over OTLP. Telemetry the org cannot
-        lose goes here, so the export is queued and retried.
+        The org's primary APM Backend, reached over OTLP, and the one an incident
+        is worked from. It takes every Signal because correlating them is the
+        reason to have it. Telemetry the org cannot lose goes here, so its queue is
+        the largest, retried, and written to disk.
       endpoint: apm-otlp.observability.svc.cluster.local:4317
       delivery:
         queue_size: 20000
+        retry: true
+        spill: true
+
+    - backend: metrics-store
+      description: >-
+        The long-retention metrics Backend — dashboards and capacity planning, not
+        incident triage. It takes metrics ONLY: it has nowhere to put a span, and
+        exporting traces to it would produce failures indistinguishable from it
+        being down. Durable, because a gap in a capacity series is not recoverable
+        after the fact.
+      endpoint: metrics-otlp.observability.svc.cluster.local:4317
+      signals: [metrics]
+      delivery:
+        queue_size: 10000
+        retry: true
+        spill: true
+
+    - backend: cold-archive
+      description: >-
+        Cheap long-term retention for traces and logs, read for audit and for
+        incidents older than the primary APM keeps. Nothing is waiting on it, so it
+        gets a small in-memory queue and no spill: an archive that loses an hour
+        during an outage is an acceptable outcome, and disk the primary APM could
+        have used is not.
+      endpoint: archive-otlp.observability.svc.cluster.local:4317
+      signals: [traces, logs]
+      delivery:
+        queue_size: 2000
         retry: true

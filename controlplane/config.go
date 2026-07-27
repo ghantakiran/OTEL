@@ -3,6 +3,7 @@ package controlplane
 import (
 	"fmt"
 	"net"
+	"path"
 	"sort"
 
 	"gopkg.in/yaml.v3"
@@ -21,16 +22,25 @@ import (
 // and a caller comparing two rollouts wants to diff structure, not formatting.
 // YAML is one rendering of it, not the thing itself.
 type CollectorConfig struct {
-	Receivers  map[string]any   `yaml:"receivers"`
-	Processors map[string]any   `yaml:"processors"`
-	Exporters  map[string]any   `yaml:"exporters"`
+	Receivers  map[string]any `yaml:"receivers"`
+	Processors map[string]any `yaml:"processors"`
+	Exporters  map[string]any `yaml:"exporters"`
+	// Extensions are components that serve the collector rather than a pipeline —
+	// today, the per-Backend spill storage the Gateway's sending queues write to.
+	// Omitted entirely when there are none, so an Agent's config is unchanged by
+	// the field existing.
+	Extensions map[string]any   `yaml:"extensions,omitempty"`
 	Service    CollectorService `yaml:"service"`
 }
 
 // CollectorService is the collector's `service` block: which pipelines run, and
 // what each is wired from.
 type CollectorService struct {
-	Pipelines map[string]Pipeline `yaml:"pipelines"`
+	// Extensions are the extensions the collector actually starts. Defining one is
+	// not enough — an extension absent from here is inert, which for spill storage
+	// means a queue that silently is not persistent.
+	Extensions []string            `yaml:"extensions,omitempty"`
+	Pipelines  map[string]Pipeline `yaml:"pipelines"`
 }
 
 // Pipeline is one Signal's path through a collector.
@@ -49,6 +59,9 @@ const (
 	resourceProcessor      = "resource"
 	memoryLimiterProcessor = "memory_limiter"
 	gatewayExporter        = "otlp/gateway"
+	// fileStorageExtension backs a persistent sending queue. It is the one component
+	// on this platform that is not in the collector's core distribution (ADR 0014).
+	fileStorageExtension = "file_storage"
 )
 
 // assemble builds the config from the three inputs. Kept separate from Compile so
@@ -138,16 +151,42 @@ func assembleGateway(declaration GatewayDeclaration) CollectorConfig {
 		processors = append([]string{memoryLimiterProcessor}, processors...)
 	}
 
-	exporters := make([]string, 0, len(declaration.Backends))
+	// One exporter per Backend, each owning its queue, its retry and — when it
+	// spills — its own storage instance on its own directory. Isolation is exactly
+	// this: nothing here is shared between two Backends, so a Backend that stops
+	// answering fills its own queue and spills to its own disk (ADR 0010).
 	for _, backend := range declaration.Backends {
 		config.Exporters[backendExporter(backend)] = backendExport(backend)
-		exporters = append(exporters, backendExporter(backend))
+
+		if backend.Delivery.Spill {
+			if config.Extensions == nil {
+				config.Extensions = map[string]any{}
+			}
+			config.Extensions[backendStorage(backend)] = map[string]any{
+				"directory": spillDirectory(declaration.SpillRoot, backend),
+				// The directory is a mount point's subdirectory, so on a fresh volume it
+				// does not exist yet. Without this the Gateway refuses to start on the
+				// first rollout after a Backend is given spill.
+				"create_directory": true,
+			}
+			config.Service.Extensions = append(config.Service.Extensions, backendStorage(backend))
+		}
 	}
 
 	// One pipeline per Signal, unconditionally. An Agent's pipelines are the Signals
 	// one Contract declares; the Gateway is shared by the whole fleet, so it must
 	// relay anything any Contract could declare.
+	//
+	// Which Backends each pipeline fans out to is per Signal, though: a metrics
+	// store has no traces pipeline to receive into, and sending it traces would
+	// produce export failures indistinguishable from it being down.
 	for _, signal := range contract.Signals() {
+		exporters := make([]string, 0, len(declaration.Backends))
+		for _, backend := range declaration.Backends {
+			if backend.Receives(signal) {
+				exporters = append(exporters, backendExporter(backend))
+			}
+		}
 		config.Service.Pipelines[string(signal)] = Pipeline{
 			Receivers:  []string{otlpReceiver},
 			Processors: processors,
@@ -158,10 +197,25 @@ func assembleGateway(declaration GatewayDeclaration) CollectorConfig {
 }
 
 // backendExporter is the collector component ID for a Backend's exporter. Named
-// after the Backend so that a Gateway fanning out to several (C5, #13) reads as a
-// list of destinations rather than otlp/1, otlp/2.
+// after the Backend so that a Gateway fanning out to several reads as a list of
+// destinations rather than otlp/1, otlp/2 — and so that the per-Backend metrics
+// C7 (#15) will read are labelled by something a human recognises.
 func backendExporter(backend Backend) string {
 	return otlpReceiver + "/" + backend.Name
+}
+
+// backendStorage is the collector component ID for one Backend's spill storage.
+// Named after the Backend for the same reason its exporter is: two Backends
+// sharing a storage instance share a file lock, a disk budget and a corruption
+// blast radius, which is the coupling per-Backend queues exist to remove.
+func backendStorage(backend Backend) string {
+	return fileStorageExtension + "/" + backend.Name
+}
+
+// spillDirectory is where one Backend's persistent queue lives: its own
+// subdirectory of the Gateway's spill volume, named after it.
+func spillDirectory(root string, backend Backend) string {
+	return path.Join(root, backend.Name)
 }
 
 // backendExport is the OTLP exporter aimed at one Backend, with that Backend's own
@@ -171,10 +225,17 @@ func backendExport(backend Backend) map[string]any {
 	exporter := map[string]any{"endpoint": backend.Endpoint}
 
 	if backend.Delivery.QueueSize > 0 {
-		exporter["sending_queue"] = map[string]any{
+		queue := map[string]any{
 			"enabled":    true,
 			"queue_size": backend.Delivery.QueueSize,
 		}
+		// A queue named a storage extension is written to disk instead of held in
+		// memory, so it survives the Gateway restarting while this Backend is down.
+		// The extension is this Backend's own; nothing else writes to it.
+		if backend.Delivery.Spill {
+			queue["storage"] = backendStorage(backend)
+		}
+		exporter["sending_queue"] = queue
 	}
 	if backend.Delivery.Retry {
 		exporter["retry_on_failure"] = map[string]any{"enabled": true}
@@ -282,6 +343,34 @@ func (cc CollectorConfig) Validate() error {
 		}
 	}
 
+	// Extensions serve the collector rather than a pipeline, so they are checked
+	// against the service block instead. Both directions are silent failures: a
+	// queue naming storage that does not exist stops the collector at load, and
+	// storage the service block never starts is inert — the queue stays in memory
+	// while the config, the mounted volume and every reviewer say otherwise.
+	for _, name := range cc.Service.Extensions {
+		if _, defined := cc.Extensions[name]; !defined {
+			return fmt.Errorf("the config runs extension %q, which it does not define", name)
+		}
+		used["extension/"+name] = true
+	}
+
+	// The third reference a spilling config makes, and the only one not visible from
+	// the service block: an exporter's queue names the storage it spills to. Whether
+	// that lines up is currently kept true by two separate branches in assembly
+	// agreeing, which is not the same as being checked.
+	for exporter, definition := range cc.Exporters {
+		storage, spills := spillStorageOf(definition)
+		if !spills {
+			continue
+		}
+		if !used["extension/"+storage] {
+			return fmt.Errorf(
+				"the %s exporter's sending queue spills to storage %q, which the config does not run — the collector would refuse this at load",
+				exporter, storage)
+		}
+	}
+
 	for kind, defined := range map[string]map[string]any{
 		"receiver": cc.Receivers, "processor": cc.Processors, "exporter": cc.Exporters,
 	} {
@@ -291,7 +380,29 @@ func (cc CollectorConfig) Validate() error {
 			}
 		}
 	}
+	for name := range cc.Extensions {
+		if !used["extension/"+name] {
+			return fmt.Errorf("the config defines extension %q but the service block does not run it, so it does nothing", name)
+		}
+	}
 	return nil
+}
+
+// spillStorageOf is the storage extension an exporter's sending queue spills to,
+// and whether it spills at all. Reading it back out of the emitted map rather than
+// off the Backend keeps Validate a property of the config, checkable on one a
+// caller assembled or loaded.
+func spillStorageOf(exporter any) (string, bool) {
+	definition, isMap := exporter.(map[string]any)
+	if !isMap {
+		return "", false
+	}
+	queue, queued := definition["sending_queue"].(map[string]any)
+	if !queued {
+		return "", false
+	}
+	storage, spills := queue["storage"].(string)
+	return storage, spills && storage != ""
 }
 
 // YAML renders the config as a collector configuration file.
