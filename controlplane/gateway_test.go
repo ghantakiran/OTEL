@@ -32,7 +32,7 @@ func TestTheGatewayCarriesEverySignalAnAgentCanForward(t *testing.T) {
 	// An Agent's pipelines are the Signals one Contract declares. The Gateway is
 	// shared by the whole fleet, so it must relay anything any Contract could
 	// declare — every Signal there is, not a per-tier subset.
-	config, err := controlplane.CompileGateway(gatewayDeclaration(t), profiles(t))
+	config, err := controlplane.CompileGateway(gatewayDeclaration(t), profiles(t), orgStandards(t))
 	if err != nil {
 		t.Fatalf("compile the Gateway: %v", err)
 	}
@@ -53,15 +53,20 @@ func TestTheGatewayRebatchesTheWholeFleetUnderAMemoryCeiling(t *testing.T) {
 	// the chain for the same reason an Agent's does — a limiter placed after
 	// batching caps memory that batching has already been allowed to allocate.
 	declaration := gatewayDeclaration(t)
-	config, err := controlplane.CompileGateway(declaration, profiles(t))
+	config, err := controlplane.CompileGateway(declaration, profiles(t), orgStandards(t))
 	if err != nil {
 		t.Fatalf("compile the Gateway: %v", err)
 	}
 
-	want := []string{"memory_limiter", "batch"}
+	// The two ends of the chain are what this test is about, not its length: the
+	// Gateway also runs the Pipeline Guardrails the Standard catalog compiles into
+	// it, and how many of those there are is the catalog's business.
 	for signal, pipeline := range config.Service.Pipelines {
-		if !slices.Equal(pipeline.Processors, want) {
-			t.Errorf("the %s pipeline's processors are %v, want %v", signal, pipeline.Processors, want)
+		if first := pipeline.Processors[0]; first != "memory_limiter" {
+			t.Errorf("the %s pipeline runs %q before its memory ceiling: %v", signal, first, pipeline.Processors)
+		}
+		if last := pipeline.Processors[len(pipeline.Processors)-1]; last != "batch" {
+			t.Errorf("the %s pipeline batches before %q rather than last: %v", signal, last, pipeline.Processors)
 		}
 	}
 
@@ -99,7 +104,7 @@ profiles:
 `)
 	declaration := gatewayDeclaration(t)
 
-	_, err := controlplane.CompileGateway(declaration, sendingAgentsElsewhere)
+	_, err := controlplane.CompileGateway(declaration, sendingAgentsElsewhere, orgStandards(t))
 	if err == nil {
 		t.Fatal("the Gateway compiled while a Pipeline Profile points Agents at a port it does not answer on")
 	}
@@ -121,7 +126,7 @@ func TestTheOrgsGatewayFansOutToSeveralIsolatedBackends(t *testing.T) {
 		t.Fatalf("the org's Gateway declares %d Backend(s); fan-out means more than one", len(declaration.Backends))
 	}
 
-	config, err := controlplane.CompileGateway(declaration, profiles(t))
+	config, err := controlplane.CompileGateway(declaration, profiles(t), orgStandards(t))
 	if err != nil {
 		t.Fatalf("compile the Gateway: %v", err)
 	}
@@ -176,7 +181,7 @@ gateway:
       endpoint: archive-otlp.observability.svc.cluster.local:4317
 `)
 
-	config, err := controlplane.CompileGateway(declaration, profiles(t))
+	config, err := controlplane.CompileGateway(declaration, profiles(t), orgStandards(t))
 	if err != nil {
 		t.Fatalf("compile the Gateway: %v", err)
 	}
@@ -216,7 +221,7 @@ gateway:
       signals: [metrics]
 `)
 
-	config, err := controlplane.CompileGateway(declaration, profiles(t))
+	config, err := controlplane.CompileGateway(declaration, profiles(t), orgStandards(t))
 	if err != nil {
 		t.Fatalf("compile the Gateway: %v", err)
 	}
@@ -252,7 +257,7 @@ gateway:
     - backend: metrics-store
       endpoint: metrics-otlp.observability.svc.cluster.local:4317
       signals: [metricks]
-`), profiles(t))
+`), profiles(t), orgStandards(t))
 
 	if err == nil {
 		t.Fatal("a Backend declaring a Signal that does not exist compiled, so it receives nothing")
@@ -283,7 +288,7 @@ gateway:
     - backend: cold-archive
       endpoint: archive-otlp.observability.svc.cluster.local:4317
       signals: []
-`), profiles(t))
+`), profiles(t), orgStandards(t))
 
 	if err == nil {
 		t.Fatal("a Backend with an empty signals list compiled — written as `none` and read as `every Signal`")
@@ -309,7 +314,7 @@ gateway:
     - backend: metrics-store
       endpoint: metrics-otlp.observability.svc.cluster.local:4317
       signals: [metrics]
-`), profiles(t))
+`), profiles(t), orgStandards(t))
 
 	if err == nil {
 		t.Fatal("a Gateway compiled with no Backend for traces or logs, so both arrive and stop there")
@@ -339,7 +344,7 @@ gateway:
       endpoint: apm-otlp.observability.svc.cluster.local:4317
     - backend: primary-apm
       endpoint: apm-standby.observability.svc.cluster.local:4317
-`), profiles(t))
+`), profiles(t), orgStandards(t))
 
 	if err == nil {
 		t.Fatal("two Backends named the same compiled, so one of them silently replaced the other")
@@ -384,7 +389,7 @@ gateway:
       delivery:
         queue_size: 20000
         spill: true
-`), profiles(t))
+`), profiles(t), orgStandards(t))
 
 			if err == nil {
 				t.Fatalf("a Backend named %q compiled, so its exporter ID and its spill directory are whatever that normalises to", backend)
@@ -421,7 +426,7 @@ gateway:
         retry: false
 `)
 
-	config, err := controlplane.CompileGateway(declaration, profiles(t))
+	config, err := controlplane.CompileGateway(declaration, profiles(t), orgStandards(t))
 	if err != nil {
 		t.Fatalf("compile the Gateway: %v", err)
 	}
@@ -480,7 +485,7 @@ gateway:
         spill: true
 `)
 
-	config, err := controlplane.CompileGateway(declaration, profiles(t))
+	config, err := controlplane.CompileGateway(declaration, profiles(t), orgStandards(t))
 	if err != nil {
 		t.Fatalf("compile the Gateway: %v", err)
 	}
@@ -535,7 +540,7 @@ gateway:
       delivery:
         queue_size: 20000
         spill: true
-`), profiles(t))
+`), profiles(t), orgStandards(t))
 
 	if err == nil {
 		t.Fatal("a Backend spilling with no spill_root compiled, so its queue is persistent nowhere")
@@ -569,7 +574,7 @@ gateway:
       delivery:
         queue_size: 20000
         spill: true
-`), profiles(t))
+`), profiles(t), orgStandards(t))
 
 			if err == nil {
 				t.Fatalf("a spill_root of %q compiled, so the queue is written relative to the process's working directory", root)
@@ -601,7 +606,7 @@ gateway:
       delivery:
         retry: true
         spill: true
-`), profiles(t))
+`), profiles(t), orgStandards(t))
 
 	if err == nil {
 		t.Fatal("a Backend spilling with no queue compiled, so it has storage nothing writes to")
@@ -626,7 +631,7 @@ gateway:
     send_batch_size: 8192
 `)
 
-	_, err := controlplane.CompileGateway(noBackend, profiles(t))
+	_, err := controlplane.CompileGateway(noBackend, profiles(t), orgStandards(t))
 	if err == nil {
 		t.Fatal("a Gateway with no Backend compiled, so the fleet's telemetry would arrive and stop")
 	}
@@ -645,7 +650,7 @@ func TestAGatewayAddressThatIsNotHostAndPortDoesNotCompile(t *testing.T) {
 		"a URL, not an address": "http://otel-gateway.observability.svc.cluster.local:4317",
 	} {
 		t.Run(name, func(t *testing.T) {
-			_, err := controlplane.CompileGateway(gatewayAt(t, address), profiles(t))
+			_, err := controlplane.CompileGateway(gatewayAt(t, address), profiles(t), orgStandards(t))
 			if err == nil {
 				t.Fatalf("the Gateway compiled with %q as its address", address)
 			}
@@ -673,7 +678,7 @@ gateway:
     timeout: 5s
     send_batch_size: 8192
   backends:
-`+backend), profiles(t))
+`+backend), profiles(t), orgStandards(t))
 
 			if err == nil {
 				t.Fatalf("a Backend with %s compiled anyway", name)
@@ -717,7 +722,7 @@ gateway:
 func TestACompiledGatewayConfigIsInternallyCoherent(t *testing.T) {
 	// The same referential-integrity question the Agent's config answers, asked of
 	// the Gateway's — one intermediate model, so one Validate.
-	config, err := controlplane.CompileGateway(gatewayDeclaration(t), profiles(t))
+	config, err := controlplane.CompileGateway(gatewayDeclaration(t), profiles(t), orgStandards(t))
 	if err != nil {
 		t.Fatalf("compile the Gateway: %v", err)
 	}
@@ -907,7 +912,7 @@ func gatewayFrom(t *testing.T, body string) *controlplane.GatewayDeclaration {
 func compiledGatewayYAML(t *testing.T, declaration *controlplane.GatewayDeclaration) string {
 	t.Helper()
 
-	config, err := controlplane.CompileGateway(declaration, profiles(t))
+	config, err := controlplane.CompileGateway(declaration, profiles(t), orgStandards(t))
 	if err != nil {
 		t.Fatalf("compile the Gateway: %v", err)
 	}

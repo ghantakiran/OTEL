@@ -58,8 +58,9 @@ Commands:
   compile-fleet  Compile a whole Fleet. Run 'otel-guardrail compile-fleet --help'.
   gateway   Compile the shared Gateway. Run 'otel-guardrail gateway --help'.
 
-otel-guardrail check [--waivers <waivers.yaml>] [--enforcement <enforcement.yaml>]
-                     [--as-of <YYYY-MM-DD>] <telemetry-contract.yaml>
+otel-guardrail check [--standards <standards.yaml>] [--waivers <waivers.yaml>]
+                     [--enforcement <enforcement.yaml>] [--as-of <YYYY-MM-DD>]
+                     <telemetry-contract.yaml>
 
 Runs the Preflight Guardrail over a declared Telemetry Contract.
 Every violated Standard is reported with its Severity; only a block Severity
@@ -71,6 +72,9 @@ Epoch is legacy: a blocking Standard is reported but held back until that
 Standard's graduation deadline, then blocks by itself. First appearance comes
 from the first git commit that added the Contract, so full history is required.
 
+  --standards    Standard catalog to enforce. Defaults to the org catalog built
+                 into this binary (guardrail/standards.yaml). The same catalog
+                 'otel-guardrail gateway' compiles Pipeline Guardrails from.
   --waivers      Waiver register to honour. Defaults to the org register built
                  into this binary (guardrail/waivers.yaml).
   --enforcement  Enforcement schedule to apply. Defaults to the org schedule
@@ -89,6 +93,7 @@ func runCheck(args []string, stdout, stderr io.Writer) int {
 	flags := flag.NewFlagSet("check", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	waiverRegister := flags.String("waivers", "", "Waiver register to honour (default: the register built into this binary)")
+	standardsPath := flags.String("standards", "", "Standard catalog to enforce (default: the catalog built into this binary)")
 	schedulePath := flags.String("enforcement", "", "enforcement schedule to apply (default: the schedule built into this binary)")
 	asOf := flags.String("as-of", "", "day to judge Waiver expiry and graduation deadlines on, YYYY-MM-DD (default: today)")
 	if err := flags.Parse(args); err != nil {
@@ -123,8 +128,17 @@ func runCheck(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "otel-guardrail: %v\n", err)
 		return exitError
 	}
+	// The same catalog `gateway` compiles Pipeline Guardrails from, overridable at
+	// both consumers for the same reason: a change to it is reviewed by running it,
+	// and a flag on only one side would leave the other unreviewable.
+	standards, err := standardCatalogFrom(*standardsPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "otel-guardrail: %v\n", err)
+		return exitError
+	}
 
 	preflight, err := guardrail.NewPreflight(guardrail.StandardPolicies(),
+		guardrail.WithStandardCatalog(standards),
 		guardrail.WithWaivers(waivers),
 		guardrail.WithEnforcementSchedule(schedule),
 		// The service is dated by its Contract's own git history, so the date is

@@ -6,9 +6,10 @@ import (
 	"io"
 
 	"github.com/ghantakiran/OTEL/controlplane"
+	"github.com/ghantakiran/OTEL/guardrail"
 )
 
-const gatewayUsage = `usage: otel-guardrail gateway [--declaration <gateway.yaml>] [--profiles <profiles.yaml>]
+const gatewayUsage = `usage: otel-guardrail gateway [--declaration <gateway.yaml>] [--profiles <profiles.yaml>] [--standards <standards.yaml>]
 
 Compiles the org's Gateway Declaration into collector configuration for the shared
 Gateway, and writes it to stdout.
@@ -23,10 +24,18 @@ The Pipeline Profiles are read too, and cross-checked: every Profile forwards it
 tier's Agents to an address, and the Gateway must be the thing answering there. A
 Gateway that listens somewhere no Agent is sending does not compile.
 
+The Standard catalog is read too. Every Standard it marks enforced_at: [pipeline]
+compiles into collector processors here — a Pipeline Guardrail, running against
+live telemetry in the one place that sees the whole fleet. It is the same catalog
+the check command enforces before deploy, so a Standard has one definition, not
+two.
+
   --declaration  Gateway Declaration to compile. Defaults to the org declaration
                  built into this binary (controlplane/gateway.yaml).
   --profiles     Pipeline Profiles to cross-check against. Defaults to the org
                  Profiles built into this binary (controlplane/profiles.yaml).
+  --standards    Standard catalog to compile Pipeline Guardrails from. Defaults to
+                 the org catalog built into this binary (guardrail/standards.yaml).
 
 Exit codes: 0 compiled, 1 the Gateway cannot be compiled as declared, 2 the
 compiler could not run.`
@@ -37,6 +46,7 @@ func runGateway(args []string, stdout, stderr io.Writer) int {
 	flags.Usage = func() { fmt.Fprintln(stderr, gatewayUsage) }
 	declarationPath := flags.String("declaration", "", "Gateway Declaration to compile (default: the declaration built into this binary)")
 	profilePath := flags.String("profiles", "", "Pipeline Profiles to cross-check against (default: the Profiles built into this binary)")
+	standardsPath := flags.String("standards", "", "Standard catalog to compile Pipeline Guardrails from (default: the catalog built into this binary)")
 	if err := flags.Parse(args); err != nil {
 		return exitError
 	}
@@ -59,10 +69,19 @@ func runGateway(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "otel-guardrail: %v\n", err)
 		return exitError
 	}
+	// A catalog that will not parse, or that declares a Standard enforced at the
+	// pipeline which cannot be compiled into processors, is a broken catalog — the
+	// platform team's problem, and exit 2 says so. It is the same split an absent
+	// Severity already makes: never charged to whoever ran the compiler.
+	standards, err := standardCatalogFrom(*standardsPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "otel-guardrail: %v\n", err)
+		return exitError
+	}
 
 	// Whereas a declaration that describes a Gateway this cannot build is a finding
 	// about that declaration, and whoever wrote it is who fixes it: exit 1.
-	config, err := controlplane.CompileGateway(declaration, profiles)
+	config, err := controlplane.CompileGateway(declaration, profiles, standards)
 	if err != nil {
 		fmt.Fprintf(stderr, "otel-guardrail: %v\n", err)
 		return exitViolation
@@ -90,4 +109,14 @@ func gatewayDeclarationFrom(path string) (*controlplane.GatewayDeclaration, erro
 		return controlplane.CentralGateway()
 	}
 	return controlplane.LoadGateway(path)
+}
+
+// standardCatalogFrom picks the Standard catalog to compile Pipeline Guardrails
+// from: the one the caller pointed at, else the org catalog compiled into this
+// binary — the same one `check` enforces at Preflight.
+func standardCatalogFrom(path string) (*guardrail.StandardCatalog, error) {
+	if path == "" {
+		return guardrail.CentralStandards()
+	}
+	return guardrail.LoadStandards(path)
 }

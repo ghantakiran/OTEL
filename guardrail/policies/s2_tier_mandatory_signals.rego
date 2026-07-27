@@ -37,9 +37,10 @@ violation contains v if {
 }
 
 # S2 is a build-blocking Standard: a service emitting less than its criticality
-# demands is not observable enough to operate.
+# demands is not observable enough to operate. The Severity is read from the
+# catalog, not written here, for the same reason the tiers are — see S1.
 block(message) := {
 	"standard": "S2",
-	"severity": "block",
+	"severity": data.otel.standards.S2.severity,
 	"message": message,
 }

@@ -63,13 +63,48 @@ func Compile(c contract.Contract, taxonomy *guardrail.Taxonomy, profiles *Profil
 // CompileGateway turns the org's Gateway Declaration into collector configuration
 // for the shared Gateway (ADR 0013).
 //
+// It takes the Standard catalog because the Gateway is where Pipeline Guardrails
+// run. Every Standard the catalog marks `enforced_at: [pipeline]` compiles into
+// collector processors here — from the same catalog entry the Rego reads at
+// Preflight, so one Standard has one definition and the two enforcement points
+// cannot drift apart (ADR 0015). A Standard that declares `pipeline` and cannot
+// be expressed as processors is refused when the catalog is read, not weakened
+// here.
+//
 // It takes the Pipeline Profiles too, and not for anything it copies out of them:
 // the Profiles are the other half of the same topology. They tell every Agent in
 // the fleet where to forward, this tells the Gateway where to listen, and the two
 // living in separate files is exactly how they come to disagree. So compiling
 // cross-checks them, and refuses rather than emitting a Gateway that answers
 // somewhere no Agent is sending.
-func CompileGateway(declaration *GatewayDeclaration, profiles *ProfileSet) (CollectorConfig, error) {
+func CompileGateway(declaration *GatewayDeclaration, profiles *ProfileSet, standards *guardrail.StandardCatalog) (CollectorConfig, error) {
+	// A catalog that is absent has no pipeline-enforced Standards, which is exactly
+	// what a catalog that enforces none looks like — so omitting it would compile a
+	// Gateway that runs no Guardrail at all, silently. "The org enforces nothing at
+	// the pipeline" has to be something written in a document, never something a
+	// caller forgot.
+	if standards == nil {
+		return CollectorConfig{}, fmt.Errorf(
+			"cannot compile the Gateway: no Standard catalog was given, so it is not decided which Standards it enforces at the pipeline — an empty catalog says none, an absent one says nothing")
+	}
+
+	// Every pipeline-enforced Standard must compile to a condition with something
+	// in it. It is unreachable today — the catalog refuses an empty
+	// `resource_attributes:`, and only that requirement kind may declare `pipeline`
+	// — but it is unreachable because of two guards in another package, which is
+	// not the same as being checked. Adding a requirement kind to the expressible
+	// set without teaching the compiler to build its condition would otherwise emit
+	// `set(...) where ` with a dangling clause: a Gateway that fails at load, on a
+	// rollout, for the whole fleet. Same reason Validate re-checks the spill
+	// storage that assembly already keeps true.
+	for _, standard := range standards.PipelineEnforced() {
+		if len(standard.Requires.ResourceAttributes) == 0 {
+			return CollectorConfig{}, fmt.Errorf(
+				"cannot compile the Gateway: Standard %s is enforced at the pipeline but compiles to no condition, so it would emit a processor statement the collector cannot parse",
+				standard.ID)
+		}
+	}
+
 	// The Gateway's OTLP receiver is derived from this address's port, so an address
 	// that is not one compiles a Gateway that never starts — and the fleet, not the
 	// person who edited the file, is who finds out.
@@ -175,7 +210,7 @@ func CompileGateway(declaration *GatewayDeclaration, profiles *ProfileSet) (Coll
 			strings.Join(orphaned, ", "))
 	}
 
-	return assembleGateway(*declaration), nil
+	return assembleGateway(*declaration, standards), nil
 }
 
 // signalsNoBackendReceives is every Signal that no declared Backend takes.

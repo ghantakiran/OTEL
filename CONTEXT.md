@@ -95,12 +95,28 @@ A static Guardrail that runs before deploy (in CI/CD), reading a service's OTEL 
 _Avoid_: Static check, linter, gate
 
 **Pipeline Guardrail**:
-A runtime Guardrail that runs inside the Gateway, inspecting real telemetry and acting (drop, tag, or alert) on violation.
+A runtime Guardrail that runs inside the Gateway, inspecting real telemetry and acting (drop, tag, or alert) on violation. It is compiled from the Standard Catalog into collector processors, because a collector cannot evaluate Rego. Today it acts by Guardrail Tag alone: Severity decides how loudly a violation is marked, never whether the telemetry survives (ADR 0015).
 _Avoid_: Processor rule, runtime check
 
 **Standard**:
 A single org-defined requirement that Guardrails enforce (e.g. required resource attribute, mandatory signal per service tier, cardinality limit, semantic-convention conformance). Authored once in a single catalog; each Standard declares its enforcement point(s) — `preflight`, `pipeline`, or both — since not every requirement is checkable at both.
 _Avoid_: Rule, policy, convention
+
+**Standard Catalog**:
+The org's single document of every Standard — what each requires, at what Severity, and at which Enforcement Point(s). It is the source of truth for *both* Guardrails: a Preflight Guardrail's Rego reads it as data, and the Control Plane compiles the pipeline-enforced entries into the Gateway. A Standard's Rego says how to detect a violation in a declared Contract; it never says what the Standard requires or how severely, because a collector cannot run Rego and the second enforcement point would then be a second definition.
+_Avoid_: Policy library, ruleset, standards list
+
+**Enforcement Point**:
+Where a Standard is enforced — `preflight` or `pipeline`. It is a property of the Standard, declared in the Standard Catalog, and both Guardrails honour it: a Standard not enforced at `preflight` must not fail a build, and one not enforced at `pipeline` is not compiled into the Gateway. An absent or unrecognised Enforcement Point is a hard error, the same treatment an absent Severity gets.
+_Avoid_: Stage, phase, where-it-runs, scope
+
+**Requirement Kind**:
+What sort of thing a Standard demands, which is what decides whether it can be enforced at the pipeline at all. A requirement about one record (a resource attribute being present) can be compiled into collector processors; one about a stream over time (whether a service emits a Signal at all, or how many distinct values an attribute takes) cannot, because a Gateway inspects one record at a time. A Standard declaring an Enforcement Point its Requirement Kind cannot deliver is refused, never compiled into something weaker.
+_Avoid_: Check type, rule type, predicate
+
+**Guardrail Tag**:
+The resource attributes a Pipeline Guardrail writes onto a violating record: one per violated Standard, named for it and valued at that Standard's Severity, plus a single `blocking` roll-up when any violated Standard is `block`. It is how a violation is reported — there is no separate event stream, in keeping with the platform observing itself through its own telemetry (ADR 0010). Compliant telemetry carries none, and the Gateway clears the whole namespace before writing, so a Tag is always the Gateway's verdict and never something a service said about itself.
+_Avoid_: Annotation, label, marker, violation event
 
 **Telemetry Contract**:
 A per-service declaration of what telemetry a service intends to emit — its tier, owner, signals, and key attributes — authored by the service team and checked by Guardrails. It is a declared intent, not observed reality.
@@ -142,7 +158,10 @@ _Avoid_: Cutoff, go-live, launch date
 
 - A **Guardrail** is either a **Preflight Guardrail** or a **Pipeline Guardrail** — never both at once in a given sentence.
 - A **Guardrail** enforces one or more **Standards**.
-- A **Standard** declares its enforcement point(s); the matching **Guardrail** (Preflight and/or Pipeline) runs it.
+- A **Standard** declares its **Enforcement Point**(s); the matching **Guardrail** (Preflight and/or Pipeline) runs it, and the other one does not.
+- The **Standard Catalog** defines every **Standard**; both Guardrails read it rather than restating it, exactly as both a **Standard** and a **Pipeline Profile** read the **Service Tier Taxonomy**.
+- A **Standard**'s **Requirement Kind** decides which **Enforcement Point**s it can declare; one it cannot deliver is refused rather than compiled.
+- A **Pipeline Guardrail** reports a violation as a **Guardrail Tag** on the telemetry itself, so an operator reads it in a **Backend** rather than from a status channel the platform does not have.
 - The **Copilot** must **Ground** every claim in telemetry evidence; the **Eval Harness** score gates promotion up the **Autonomy Ladder**.
 - Advice rungs are gated on **Incident Corpus** accuracy; action rungs are additionally gated on zero harmful actions across the **Harm Set**.
 - Each service has one **Telemetry Contract**.
@@ -157,7 +176,7 @@ _Avoid_: Cutoff, go-live, launch date
 - Each **Service Tier** selects a default **Pipeline Profile**; a platform-approved override may assign a different one.
 - The **Control Plane** **Compiles** a whole **Fleet** into a **Rollout**, indexed by a **Rollout Manifest**; merging that commit *is* the rollout.
 - A **Telemetry Contract** that does not **Compile** is recorded in the **Rollout Manifest** and keeps whatever collector configuration it last compiled to — it is skipped, never guessed at and never silently dropped.
-- An **Agent** forwards to a **Gateway**; the **Gateway** hosts **Pipeline Guardrails**.
+- An **Agent** forwards to a **Gateway**; the **Gateway** hosts **Pipeline Guardrails**, and an **Agent** hosts none.
 - A **Gateway** fans out to one or more **Backends**, defined in the **Gateway Declaration**; a service never targets a **Backend** directly.
 - A **Backend** receives only the **Signals** it declares, so a metrics store is absent from the traces pipeline; a **Signal** no **Backend** receives does not **Compile**.
 - **Backend Isolation** is what makes fanning out from one **Gateway** safe: a **Backend** that stops answering fills its own queue and **Spills** to its own directory, and the others keep exporting.

@@ -9,6 +9,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/ghantakiran/OTEL/contract"
+	"github.com/ghantakiran/OTEL/guardrail"
 )
 
 // CollectorConfig is a compiled OpenTelemetry Collector configuration — for one
@@ -118,7 +119,7 @@ func assemble(c contract.Contract, profile Profile, signals []contract.Signal) C
 
 // assembleGateway builds the shared Gateway's config: receive OTLP from the
 // fleet's Agents, rebatch across all of them, export to a Backend.
-func assembleGateway(declaration GatewayDeclaration) CollectorConfig {
+func assembleGateway(declaration GatewayDeclaration, standards *guardrail.StandardCatalog) CollectorConfig {
 	config := CollectorConfig{
 		Receivers: map[string]any{
 			otlpReceiver: map[string]any{
@@ -142,14 +143,31 @@ func assembleGateway(declaration GatewayDeclaration) CollectorConfig {
 	// The Gateway absorbs the whole fleet's telemetry, so its ceiling matters more
 	// than any Agent's — and it goes first for the same reason: a limiter placed
 	// after batching caps memory batching has already been allowed to allocate.
-	processors := []string{batchProcessor}
+	var processors []string
 	if declaration.MemoryLimitMiB > 0 {
 		config.Processors[memoryLimiterProcessor] = map[string]any{
 			"limit_mib":      declaration.MemoryLimitMiB,
 			"check_interval": "1s",
 		}
-		processors = append([]string{memoryLimiterProcessor}, processors...)
+		processors = append(processors, memoryLimiterProcessor)
 	}
+
+	// The Pipeline Guardrails, compiled from the Standards the catalog enforces at
+	// the pipeline. They run in the GATEWAY and nowhere else: an Agent does no
+	// enforcement (ADR 0007), and one central place to inspect the whole fleet's
+	// telemetry is the reason there is a Gateway tier at all.
+	//
+	// Upstream of the fan-out, so a record is judged once rather than once per
+	// Backend, and before `batch`, so that what every exporter sends is already
+	// tagged and no Backend receives a different verdict from another.
+	if guardrails, enforced := pipelineGuardrails(standards); enforced {
+		config.Processors[pipelineGuardrailProcessor] = guardrails
+		processors = append(processors, pipelineGuardrailProcessor)
+	}
+
+	// Batching is last: it is how telemetry leaves, not something that decides
+	// anything about it.
+	processors = append(processors, batchProcessor)
 
 	// One exporter per Backend, each owning its queue, its retry and — when it
 	// spills — its own storage instance on its own directory. Isolation is exactly

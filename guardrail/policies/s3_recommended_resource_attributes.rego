@@ -4,19 +4,20 @@
 # S3 warns rather than blocks. They pay off during triage — `service.namespace`
 # tells two same-named services in different systems apart, and
 # `service.instance.id` tells one replica from another when only some are sick.
+#
+# Which attributes, and at what Severity, come from `data.otel.standards.S3` —
+# guardrail/standards.yaml, the one catalog both enforcement points read. See S1
+# for why this policy names neither.
 package otel.guardrail.standards.s3
 
-recommended_attributes := {
-	"service.namespace",
-	"service.instance.id",
-}
+standard := data.otel.standards.S3
 
 violation contains v if {
-	some attribute in recommended_attributes
+	some attribute in standard.requires.resource_attributes
 	not input.resource_attributes[attribute]
 	v := {
 		"standard": "S3",
-		"severity": "warn",
+		"severity": standard.severity,
 		"message": sprintf("recommended resource attribute %q is not declared", [attribute]),
 	}
 }

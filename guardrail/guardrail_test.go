@@ -3,6 +3,8 @@ package guardrail_test
 import (
 	"context"
 	"io/fs"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -62,12 +64,18 @@ func TestCheckDoesNotFailTheBuildForAWarnSeverityViolation(t *testing.T) {
 }
 
 func TestCheckRefusesAStandardThatDeclaresNoSeverity(t *testing.T) {
+	// The Severity belongs in the catalog and the policy reads it from there — but
+	// a policy is Rego and can emit whatever it likes, so what it emits is still
+	// validated where policy data becomes domain data. This is the shape that bug
+	// takes in practice: an author who read the requirement from the catalog and
+	// then wrote the violation object by hand.
 	preflight := preflightOver(t, `package otel.guardrail.standards.sx
 
 violation contains v if {
-	v := {"standard": "SX", "message": "SX is always violated"}
+	some attribute in data.otel.standards.SX.requires.resource_attributes
+	v := {"standard": "SX", "message": sprintf("SX requires %q", [attribute])}
 }
-`)
+`, catalogDeclaring("SX"))
 
 	_, err := preflight.Check(context.Background(), contract.Contract{ServiceName: "any-service"})
 
@@ -83,9 +91,10 @@ func TestCheckRefusesAStandardThatDeclaresAnUnrecognisedSeverity(t *testing.T) {
 	preflight := preflightOver(t, `package otel.guardrail.standards.sy
 
 violation contains v if {
-	v := {"standard": "SY", "severity": "critical", "message": "SY is always violated"}
+	some attribute in data.otel.standards.SY.requires.resource_attributes
+	v := {"standard": "SY", "severity": "critical", "message": sprintf("SY requires %q", [attribute])}
 }
-`)
+`, catalogDeclaring("SY"))
 
 	_, err := preflight.Check(context.Background(), contract.Contract{ServiceName: "any-service"})
 
@@ -107,24 +116,48 @@ func reports(violations []guardrail.Violation, standard, subject string) bool {
 	return false
 }
 
-// preflightOver builds a Preflight Guardrail whose catalog is the real
-// aggregator plus one hand-written Standard, so a test can exercise a Standard
-// the shipped catalog would never contain.
-func preflightOver(t *testing.T, standard string) *guardrail.Preflight {
+// preflightOver builds a Guardrail over one hand-written policy and a Standard
+// catalog that matches it. Both are needed: a Standard is a policy AND a catalog
+// entry, and NewPreflight refuses a pair that does not meet.
+func preflightOver(t *testing.T, policy, catalog string) *guardrail.Preflight {
 	t.Helper()
 
 	aggregator, err := fs.ReadFile(guardrail.StandardPolicies(), "guardrail.rego")
 	if err != nil {
 		t.Fatalf("read aggregator: %v", err)
 	}
+
+	path := filepath.Join(t.TempDir(), "standards.yaml")
+	if err := os.WriteFile(path, []byte(catalog), 0o600); err != nil {
+		t.Fatalf("write Standard catalog: %v", err)
+	}
+	standards, err := guardrail.LoadStandards(path)
+	if err != nil {
+		t.Fatalf("load Standard catalog: %v", err)
+	}
+
 	preflight, err := guardrail.NewPreflight(fstest.MapFS{
 		"guardrail.rego": {Data: aggregator},
-		"standard.rego":  {Data: []byte(standard)},
-	})
+		"standard.rego":  {Data: []byte(policy)},
+	}, guardrail.WithStandardCatalog(standards))
 	if err != nil {
 		t.Fatalf("new Preflight Guardrail: %v", err)
 	}
 	return preflight
+}
+
+// catalogDeclaring is a one-entry Standard catalog for a hand-written policy.
+func catalogDeclaring(id string) string {
+	return `apiVersion: guardrail.otel/v1
+kind: StandardCatalog
+standards:
+  - standard: ` + id + `
+    title: A Standard written for one test.
+    severity: block
+    enforced_at: [preflight]
+    requires:
+      resource_attributes: [service.name]
+`
 }
 
 func check(t *testing.T, contractPath string) []guardrail.Violation {
