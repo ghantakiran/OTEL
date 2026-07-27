@@ -1,11 +1,23 @@
 # The whole of what the harness adds to the compiled Gateway config. See
-# insecure/agent.yaml — same concession, the Gateway-to-Backend hop this time.
+# insecure/agent.yaml — same concession, the Gateway-to-Backend hop this time, once
+# per Backend the Gateway fans out to.
 #
-# The exporter name here is derived from the Backend's name in
+# Each exporter name here is derived from a Backend's name in
 # controlplane/gateway.yaml (`backend: primary-apm` compiles to `otlp/primary-apm`).
-# Renaming that Backend means renaming this too, and the harness fails loudly if
-# they disagree: the collector refuses a config naming an exporter no pipeline uses.
+# Renaming or removing a Backend means changing this too, and the harness fails
+# loudly if they disagree: the collector refuses a config naming an exporter no
+# pipeline uses.
+#
+# Nothing here touches the spill extensions. `file_storage` is not a network
+# component and needs no TLS concession — what it needs is a writable directory at
+# the Gateway's spill_root, which docker-compose.yaml mounts.
 exporters:
   otlp/primary-apm:
+    tls:
+      insecure: true
+  otlp/metrics-store:
+    tls:
+      insecure: true
+  otlp/cold-archive:
     tls:
       insecure: true

@@ -1,19 +1,37 @@
 # The two-tier topology, standing up: a sample service emits OTLP to its Agent,
-# the Agent forwards to the Gateway, the Gateway exports to a Backend.
+# the Agent forwards to the Gateway, the Gateway fans out to several Backends.
 #
 # The Agent's and the Gateway's configs are COMPILED — `otel-guardrail compile` and
 # `otel-guardrail gateway` write them into generated/ and they are mounted here
 # verbatim. A harness that proved a hand-written config works would prove nothing
 # about the compiler, which is the thing under test.
 #
-# Two things here are hand-written, deliberately:
+# THREE BACKEND STAND-INS, one per Backend in controlplane/gateway.yaml, and their
+# network aliases are the endpoints that file names. run.sh deliberately starts only
+# two of them: `backend-archive` is defined below and never brought up, so
+# `archive-otlp...` does not resolve and the Gateway holds a genuinely unreachable
+# Backend for the whole run. That is the scenario #13 is about — the other two must
+# keep receiving throughout, and run.sh asserts they do.
 #
-#   backend-collector.yaml   The Backend stand-in. A real Backend (Splunk, a
-#                            metrics store) is not something this repo can run, so
-#                            a collector with a `debug` exporter takes its place —
-#                            it receives OTLP over the wire exactly as a Backend
-#                            would and prints what arrived. See docs/agent-gateway-
-#                            topology.md for what that does and does not prove.
+# TWO COLLECTOR IMAGES, and the split is the point (ADR 0014):
+#
+#   gateway   opentelemetry-collector-CONTRIB. Its compiled config names
+#             file_storage, the spill extension, which is not in the core
+#             distribution. This is the constraint the ADR records, made visible:
+#             on the core image below, this same config fails at load.
+#   agent     opentelemetry-collector, CORE. The Agent needs no spill and stays
+#             core-only, so the harness keeps proving the compiled Agent config
+#             runs on a core build. Same pin, so nothing else differs.
+#
+# Two more things here are hand-written, deliberately:
+#
+#   backend-collector.yaml   The Backend stand-in, shared by all three. A real
+#                            Backend (an APM, a metrics store, a cold archive) is
+#                            not something this repo can run, so a collector with a
+#                            `debug` exporter takes its place — it receives OTLP
+#                            over the wire exactly as a Backend would and prints
+#                            what arrived. See docs/agent-gateway-topology.md for
+#                            what that does and does not prove.
 #   insecure/*.yaml          One overlay per collector, containing nothing but
 #                            `tls: insecure: true`. The compiled configs are
 #                            written for a cluster with certificates; this runs on
@@ -27,16 +45,23 @@
 name: otel-platform-harness
 
 services:
-  # The Gateway: one shared collector, receiving from every Agent, exporting to a
-  # Backend. Its config is compiled from controlplane/gateway.yaml.
+  # The Gateway: one shared collector, receiving from every Agent, fanning out to
+  # every Backend. Its config is compiled from controlplane/gateway.yaml.
   gateway:
-    image: otel/opentelemetry-collector:0.127.0
+    image: otel/opentelemetry-collector-contrib:0.127.0
     command:
       - --config=/etc/otelcol/compiled.yaml
       - --config=/etc/otelcol/insecure.yaml
     volumes:
       - ./generated/gateway.yaml:/etc/otelcol/compiled.yaml:ro
       - ./insecure/gateway.yaml:/etc/otelcol/insecure.yaml:ro
+    # The Gateway's `spill_root`. In a cluster this is a real volume; here it is
+    # tmpfs, which is writable by the collector's unprivileged user and needs no
+    # host path. That is the one thing it is NOT: durable. The harness proves the
+    # spill extensions load, start, and each open their own directory — not that a
+    # queue survives the Gateway restarting, which would need real disk.
+    tmpfs:
+      - /var/lib/otelcol/spill
     networks:
       otel:
         aliases:
@@ -56,7 +81,8 @@ services:
     networks:
       - otel
 
-  # The Backend stand-in: receives OTLP from the Gateway and prints what arrived.
+  # Backend stand-in 1 of 3: the primary APM. Takes every Signal, and is the
+  # healthy Backend the fan-out assertions are made against.
   backend:
     image: otel/opentelemetry-collector:0.127.0
     command:
@@ -66,8 +92,37 @@ services:
     networks:
       otel:
         aliases:
-          # The endpoint the Gateway Declaration names as its Backend.
           - apm-otlp.observability.svc.cluster.local
+
+  # Backend stand-in 2 of 3: the metrics store. The Gateway Declaration gives it
+  # `signals: [metrics]`, so the traces pipeline must not export to it — this
+  # container being up and silent while traces flow is what proves that.
+  backend-metrics:
+    image: otel/opentelemetry-collector:0.127.0
+    command:
+      - --config=/etc/otelcol/backend.yaml
+    volumes:
+      - ./backend-collector.yaml:/etc/otelcol/backend.yaml:ro
+    networks:
+      otel:
+        aliases:
+          - metrics-otlp.observability.svc.cluster.local
+
+  # Backend stand-in 3 of 3: the cold archive. NOT started by run.sh for most of
+  # the run — the alias below does not exist while the container does not, so the
+  # Gateway's exporter for it cannot even resolve DNS. An unreachable Backend, not
+  # a simulated one.
+  backend-archive:
+    image: otel/opentelemetry-collector:0.127.0
+    profiles: [recover]
+    command:
+      - --config=/etc/otelcol/backend.yaml
+    volumes:
+      - ./backend-collector.yaml:/etc/otelcol/backend.yaml:ro
+    networks:
+      otel:
+        aliases:
+          - archive-otlp.observability.svc.cluster.local
 
   # The sample service: emits one OTLP span to its Agent over HTTP, and — like
   # every service on this platform — names no Backend and does not know the Gateway
@@ -85,6 +140,28 @@ services:
       - --request
       - POST
       - http://agent:4318/v1/traces
+      - --header
+      - "Content-Type: application/json"
+      - --data-binary
+      - "@/payload.json"
+    networks:
+      - otel
+
+  # The same sample service emitting a metric instead of a span, so the harness can
+  # watch one Signal go where another does not.
+  sample-service-metrics:
+    image: curlimages/curl:8.11.1
+    profiles: [emit]
+    depends_on: [agent]
+    volumes:
+      - ./generated/metric.json:/payload.json:ro
+    command:
+      - --silent
+      - --show-error
+      - --fail
+      - --request
+      - POST
+      - http://agent:4318/v1/metrics
       - --header
       - "Content-Type: application/json"
       - --data-binary

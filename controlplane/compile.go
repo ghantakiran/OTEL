@@ -3,6 +3,7 @@ package controlplane
 import (
 	"fmt"
 	"net"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -91,19 +92,10 @@ func CompileGateway(declaration *GatewayDeclaration, profiles *ProfileSet) (Coll
 			"cannot compile the Gateway: it names no Backend, so the fleet's telemetry would arrive and stop there (declare one under `backends:`)")
 	}
 
-	// Fan-out to several Backends is C5 (#13). Until then the extra ones are named
-	// and refused rather than quietly ignored: exporting to the first of two
-	// declared Backends is how an org discovers mid-migration that half its
-	// telemetry never left the Gateway.
-	if len(declaration.Backends) > 1 {
-		return CollectorConfig{}, fmt.Errorf(
-			"cannot compile the Gateway: it declares %d Backends (%s), and fanning out to more than one is not built yet (C5, #13) — one of them would receive nothing",
-			len(declaration.Backends), strings.Join(backendNames(declaration.Backends[1:]), ", "))
-	}
-
 	// A Backend is a name and an endpoint. Missing either compiles an exporter that
 	// is unnameable or unreachable, and both are found out only once the Gateway is
 	// already holding the fleet's telemetry.
+	declaredOnce := map[string]bool{}
 	for _, backend := range declaration.Backends {
 		if backend.Name == "" {
 			return CollectorConfig{}, fmt.Errorf(
@@ -113,9 +105,63 @@ func CompileGateway(declaration *GatewayDeclaration, profiles *ProfileSet) (Coll
 			return CollectorConfig{}, fmt.Errorf(
 				"cannot compile the Gateway: Backend %q names no endpoint, so the Gateway would have nowhere to export to", backend.Name)
 		}
+		// A Backend's name is its identity in the compiled config — its exporter is
+		// otlp/<name>, its spill lives under <name> — so two of them sharing a name
+		// collapse into one component, and the map that swallowed the first shows no
+		// trace of it.
+		if declaredOnce[backend.Name] {
+			return CollectorConfig{}, fmt.Errorf(
+				"cannot compile the Gateway: Backend %q is declared twice, and the second would silently replace the first", backend.Name)
+		}
+		declaredOnce[backend.Name] = true
+		// Spill needs somewhere to spill to. Without a root, the storage directory
+		// would be relative to wherever the Gateway process was started — inside the
+		// container image, on no mounted volume, gone on the next restart. A queue
+		// that reads as persistent in every review and is not.
+		if backend.Delivery.Spill && declaration.SpillRoot == "" {
+			return CollectorConfig{}, fmt.Errorf(
+				"cannot compile the Gateway: Backend %q asks to spill but the Gateway declares no `spill_root:`, so its queue would be written somewhere unmounted and lost on restart", backend.Name)
+		}
+		// Spill is where the sending queue is kept, not a mechanism beside it. With no
+		// queue there is nothing to keep, and the compiled config would carry a storage
+		// extension, a directory and a mounted volume that nothing ever writes to.
+		if backend.Delivery.Spill && backend.Delivery.QueueSize == 0 {
+			return CollectorConfig{}, fmt.Errorf(
+				"cannot compile the Gateway: Backend %q asks to spill but declares no `queue_size:`, and spill is where the sending queue is kept — with no queue there is nothing to spill", backend.Name)
+		}
+		// A Signal typo matches no pipeline, so the Backend simply receives nothing
+		// while every export elsewhere still succeeds. The same reason Compile rejects
+		// a Contract's Signal typo rather than compiling a pipeline for it.
+		for _, declared := range backend.Signals {
+			if _, err := contract.ParseSignal(declared); err != nil {
+				return CollectorConfig{}, fmt.Errorf(
+					"cannot compile the Gateway: Backend %q declares %w, so it would receive nothing", backend.Name, err)
+			}
+		}
+	}
+
+	// Every Agent forwards every Signal it collects here, so a Signal no Backend
+	// takes is a pipeline that receives the fleet's telemetry and exports it
+	// nowhere. It is the no-Backend failure one Signal at a time, and just as
+	// invisible from a service: the Agent's export still succeeds.
+	if orphaned := signalsNoBackendReceives(declaration.Backends); len(orphaned) > 0 {
+		return CollectorConfig{}, fmt.Errorf(
+			"cannot compile the Gateway: no Backend receives the %s Signal(s), so they would arrive and stop there (add one, or widen a Backend's `signals:`)",
+			strings.Join(orphaned, ", "))
 	}
 
 	return assembleGateway(*declaration), nil
+}
+
+// signalsNoBackendReceives is every Signal that no declared Backend takes.
+func signalsNoBackendReceives(backends []Backend) []string {
+	var orphaned []string
+	for _, signal := range contract.Signals() {
+		if !slices.ContainsFunc(backends, func(b Backend) bool { return b.Receives(signal) }) {
+			orphaned = append(orphaned, string(signal))
+		}
+	}
+	return orphaned
 }
 
 // validAddress checks the Gateway's address is a host and port an Agent could
@@ -138,15 +184,6 @@ func validAddress(address string) error {
 		return fmt.Errorf("its address %q is a URL, not a host and port — write `host:port`", address)
 	}
 	return nil
-}
-
-// backendNames is the Backends by name, for an error that says which ones.
-func backendNames(backends []Backend) []string {
-	names := make([]string, 0, len(backends))
-	for _, backend := range backends {
-		names = append(names, backend.Name)
-	}
-	return names
 }
 
 // signalsOf is the Contract's declared Signals, rejecting anything that is not

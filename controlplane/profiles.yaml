@@ -37,8 +37,15 @@
 # tail-samples with the whole trace in hand (ADR 0007), and an Agent dropping
 # spans first would hand it broken traces. sampling.traces_percent below is the
 # GATEWAY's tail-sampling budget, owned here rather than in the Gateway
-# Declaration because it is a per-tier cost decision (ADR 0013) — it is consumed
-# when tail sampling lands (C5, #13), and is not emitted into an Agent config.
+# Declaration because it is a per-tier cost decision (ADR 0013), and it is not
+# emitted into an Agent config.
+#
+# NOTHING READS sampling.traces_percent YET — see #40. C5 (#13) built the Gateway's
+# fan-out to several Backends and deferred tail sampling there deliberately, rather
+# than leaving a third slice looking at a field nobody consumes. What blocks it is
+# not the processor: the Gateway cannot tell Service Tiers apart at run time, since
+# no Telemetry Contract stamps a tier attribute, so a per-tier policy has nothing
+# to key on. #40 either fixes that or removes these three lines.
 apiVersion: guardrail.otel/v1
 kind: PipelineProfileSet
 

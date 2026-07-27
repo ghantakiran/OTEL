@@ -1,6 +1,7 @@
 package controlplane_test
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -109,12 +110,59 @@ profiles:
 	}
 }
 
-func TestASecondBackendDoesNotCompileUntilFanOutLands(t *testing.T) {
-	// Fan-out to several Backends is C5 (#13). Until then a second Backend is
-	// refused by name rather than quietly ignored: silently exporting to the first
-	// of two declared Backends is how an org discovers, during a Splunk migration,
-	// that half its telemetry never left the Gateway.
-	twoBackends := gatewayFrom(t, `apiVersion: guardrail.otel/v1
+func TestTheOrgsGatewayFansOutToSeveralIsolatedBackends(t *testing.T) {
+	// The acceptance criterion of #13, asked of the declaration the org actually
+	// ships rather than a fixture: more than one Backend, and no two of them
+	// sharing the thing that would let one stall the others. A test over fixtures
+	// only proves fan-out is *possible*.
+	declaration := gatewayDeclaration(t)
+
+	if len(declaration.Backends) < 2 {
+		t.Fatalf("the org's Gateway declares %d Backend(s); fan-out means more than one", len(declaration.Backends))
+	}
+
+	config, err := controlplane.CompileGateway(declaration, profiles(t))
+	if err != nil {
+		t.Fatalf("compile the Gateway: %v", err)
+	}
+
+	queues, storages := map[string]string{}, map[string]string{}
+	for _, backend := range declaration.Backends {
+		exporter, defined := config.Exporters["otlp/"+backend.Name].(map[string]any)
+		if !defined {
+			t.Fatalf("Backend %q has no exporter of its own: %v", backend.Name, config.Exporters)
+		}
+
+		queue, queued := exporter["sending_queue"].(map[string]any)
+		if !queued {
+			t.Errorf("Backend %q has no queue of its own, so a stall there applies back-pressure to the Gateway itself", backend.Name)
+			continue
+		}
+		if owner, taken := queues[fmt.Sprint(queue)]; taken {
+			t.Errorf("Backends %q and %q are the same queue, so one filling fills the other's", owner, backend.Name)
+		}
+		queues[fmt.Sprint(queue)] = backend.Name
+
+		if storage, spills := queue["storage"].(string); spills {
+			if owner, taken := storages[storage]; taken {
+				t.Errorf("Backends %q and %q spill through the same storage %q, so they share a file lock and a disk budget", owner, backend.Name, storage)
+			}
+			storages[storage] = backend.Name
+		}
+	}
+
+	if len(storages) < 2 {
+		t.Errorf("only %d of the org's Backends spill; a Backend whose queue does not survive a Gateway restart is the durability C7 (#15) will read", len(storages))
+	}
+}
+
+func TestTheGatewayExportsToEveryBackendItDeclares(t *testing.T) {
+	// The point of ADR 0007: one Gateway, several Backends, and no service naming
+	// any of them. A Backend declared but left out of the pipelines receives
+	// nothing — which is how an org discovers mid-migration that half its telemetry
+	// never left the Gateway — so every declared Backend must appear in the
+	// pipelines it takes, not just the first one.
+	declaration := gatewayFrom(t, `apiVersion: guardrail.otel/v1
 kind: GatewayDeclaration
 gateway:
   address: otel-gateway.observability.svc.cluster.local:4317
@@ -128,12 +176,330 @@ gateway:
       endpoint: archive-otlp.observability.svc.cluster.local:4317
 `)
 
-	_, err := controlplane.CompileGateway(twoBackends, profiles(t))
-	if err == nil {
-		t.Fatal("two Backends compiled, so one of them is silently receiving nothing")
+	config, err := controlplane.CompileGateway(declaration, profiles(t))
+	if err != nil {
+		t.Fatalf("compile the Gateway: %v", err)
 	}
-	if !strings.Contains(err.Error(), "cold-archive") {
-		t.Errorf("the error does not name the Backend that would not have received anything: %v", err)
+
+	for _, backend := range declaration.Backends {
+		exporter := "otlp/" + backend.Name
+		if _, defined := config.Exporters[exporter]; !defined {
+			t.Errorf("the Gateway defines no exporter for Backend %q: %v", backend.Name, config.Exporters)
+			continue
+		}
+		for signal, pipeline := range config.Service.Pipelines {
+			if !slices.Contains(pipeline.Exporters, exporter) {
+				t.Errorf("the %s pipeline does not export to Backend %q, which would therefore receive no %s: %v",
+					signal, backend.Name, signal, pipeline.Exporters)
+			}
+		}
+	}
+}
+
+func TestABackendReceivesOnlyTheSignalsItDeclares(t *testing.T) {
+	// A metrics store is not a trace store. A Backend that takes one Signal must be
+	// absent from the other pipelines — otherwise the Gateway ships it telemetry it
+	// will reject, and the resulting export failures are indistinguishable from the
+	// Backend being down.
+	declaration := gatewayFrom(t, `apiVersion: guardrail.otel/v1
+kind: GatewayDeclaration
+gateway:
+  address: otel-gateway.observability.svc.cluster.local:4317
+  batch:
+    timeout: 5s
+    send_batch_size: 8192
+  backends:
+    - backend: primary-apm
+      endpoint: apm-otlp.observability.svc.cluster.local:4317
+    - backend: metrics-store
+      endpoint: metrics-otlp.observability.svc.cluster.local:4317
+      signals: [metrics]
+`)
+
+	config, err := controlplane.CompileGateway(declaration, profiles(t))
+	if err != nil {
+		t.Fatalf("compile the Gateway: %v", err)
+	}
+
+	for signal, pipeline := range config.Service.Pipelines {
+		// Omitting `signals:` means every Signal — the one-Backend reading, unchanged.
+		if !slices.Contains(pipeline.Exporters, "otlp/primary-apm") {
+			t.Errorf("the %s pipeline does not export to primary-apm, which declares no Signal subset: %v", signal, pipeline.Exporters)
+		}
+
+		takesMetrics := slices.Contains(pipeline.Exporters, "otlp/metrics-store")
+		if signal == "metrics" && !takesMetrics {
+			t.Errorf("the metrics pipeline does not export to metrics-store, which is the one Signal it takes: %v", pipeline.Exporters)
+		}
+		if signal != "metrics" && takesMetrics {
+			t.Errorf("the %s pipeline exports to metrics-store, which declares only metrics: %v", signal, pipeline.Exporters)
+		}
+	}
+}
+
+func TestABackendThatNamesSomethingThatIsNotASignalDoesNotCompile(t *testing.T) {
+	// `signals: [metricks]` is a Backend that silently receives nothing: it matches
+	// no pipeline, every export succeeds everywhere else, and the Backend is simply
+	// empty. The same reason Compile rejects a Contract's Signal typo.
+	_, err := controlplane.CompileGateway(gatewayFrom(t, `apiVersion: guardrail.otel/v1
+kind: GatewayDeclaration
+gateway:
+  address: otel-gateway.observability.svc.cluster.local:4317
+  batch:
+    timeout: 5s
+    send_batch_size: 8192
+  backends:
+    - backend: metrics-store
+      endpoint: metrics-otlp.observability.svc.cluster.local:4317
+      signals: [metricks]
+`), profiles(t))
+
+	if err == nil {
+		t.Fatal("a Backend declaring a Signal that does not exist compiled, so it receives nothing")
+	}
+	for _, want := range []string{"metrics-store", "metricks"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the error does not mention %q, so a reader cannot see what to fix: %v", want, err)
+		}
+	}
+}
+
+func TestASignalNoBackendReceivesDoesNotCompile(t *testing.T) {
+	// Every Agent forwards every Signal it collects to the Gateway. A Signal with
+	// no Backend behind it is a pipeline that receives the fleet's telemetry and
+	// exports it nowhere — the no-Backend failure again, one Signal at a time, and
+	// invisible from every service because the Agent's export still succeeds.
+	_, err := controlplane.CompileGateway(gatewayFrom(t, `apiVersion: guardrail.otel/v1
+kind: GatewayDeclaration
+gateway:
+  address: otel-gateway.observability.svc.cluster.local:4317
+  batch:
+    timeout: 5s
+    send_batch_size: 8192
+  backends:
+    - backend: metrics-store
+      endpoint: metrics-otlp.observability.svc.cluster.local:4317
+      signals: [metrics]
+`), profiles(t))
+
+	if err == nil {
+		t.Fatal("a Gateway compiled with no Backend for traces or logs, so both arrive and stop there")
+	}
+	for _, want := range []string{"traces", "logs"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the error does not name the %s Signal that nothing receives: %v", want, err)
+		}
+	}
+}
+
+func TestTwoBackendsCannotShareAName(t *testing.T) {
+	// A Backend's name is its identity in the compiled config: its exporter is
+	// otlp/<name> and its spill lives under <name>. Two Backends sharing one would
+	// collapse into a single exporter pointed at whichever endpoint was written
+	// last — one of them then receives nothing, and the map that swallowed it shows
+	// no sign of the other ever having been declared.
+	_, err := controlplane.CompileGateway(gatewayFrom(t, `apiVersion: guardrail.otel/v1
+kind: GatewayDeclaration
+gateway:
+  address: otel-gateway.observability.svc.cluster.local:4317
+  batch:
+    timeout: 5s
+    send_batch_size: 8192
+  backends:
+    - backend: primary-apm
+      endpoint: apm-otlp.observability.svc.cluster.local:4317
+    - backend: primary-apm
+      endpoint: apm-standby.observability.svc.cluster.local:4317
+`), profiles(t))
+
+	if err == nil {
+		t.Fatal("two Backends named the same compiled, so one of them silently replaced the other")
+	}
+	if !strings.Contains(err.Error(), "primary-apm") {
+		t.Errorf("the error does not name the Backend declared twice: %v", err)
+	}
+}
+
+func TestEachBackendGetsItsOwnQueueAndItsOwnRetry(t *testing.T) {
+	// The whole point of fanning out from one Gateway (ADR 0010): a Backend that
+	// stops answering must fill its own queue and nobody else's. Exporters sharing
+	// one sending queue is precisely what turns one slow Backend into everyone's
+	// outage, so each Backend's durability is read off its own `delivery` block.
+	declaration := gatewayFrom(t, `apiVersion: guardrail.otel/v1
+kind: GatewayDeclaration
+gateway:
+  address: otel-gateway.observability.svc.cluster.local:4317
+  batch:
+    timeout: 5s
+    send_batch_size: 8192
+  backends:
+    - backend: primary-apm
+      endpoint: apm-otlp.observability.svc.cluster.local:4317
+      delivery:
+        queue_size: 20000
+        retry: true
+    - backend: cold-archive
+      endpoint: archive-otlp.observability.svc.cluster.local:4317
+      delivery:
+        queue_size: 500
+        retry: false
+`)
+
+	config, err := controlplane.CompileGateway(declaration, profiles(t))
+	if err != nil {
+		t.Fatalf("compile the Gateway: %v", err)
+	}
+
+	for _, backend := range declaration.Backends {
+		exporter, defined := config.Exporters["otlp/"+backend.Name].(map[string]any)
+		if !defined {
+			t.Fatalf("the Gateway defines no exporter for Backend %q: %v", backend.Name, config.Exporters)
+		}
+
+		queue, queued := exporter["sending_queue"].(map[string]any)
+		if !queued {
+			t.Errorf("Backend %q has no sending queue of its own, so it shares whatever the Gateway holds: %v", backend.Name, exporter)
+			continue
+		}
+		if queue["queue_size"] != backend.Delivery.QueueSize {
+			t.Errorf("Backend %q queues %v, but its declaration asks for %d — its queue is not its own",
+				backend.Name, queue["queue_size"], backend.Delivery.QueueSize)
+		}
+
+		_, retries := exporter["retry_on_failure"]
+		if retries != backend.Delivery.Retry {
+			t.Errorf("Backend %q retries=%v, but its declaration says %v", backend.Name, retries, backend.Delivery.Retry)
+		}
+	}
+}
+
+func TestEachSpillingBackendGetsItsOwnStorageAndItsOwnDirectory(t *testing.T) {
+	// Spill is what makes a queue survive the Gateway being restarted while a
+	// Backend is down. It is also the place per-Backend isolation is easiest to
+	// lose: one storage extension shared by two exporters is one file lock, one
+	// disk budget and one corruption blast radius — the Backends would be coupled
+	// again through the very mechanism meant to decouple them. So the storage
+	// instance and its directory are derived from the Backend's name, and no two
+	// Backends can share a name.
+	declaration := gatewayFrom(t, `apiVersion: guardrail.otel/v1
+kind: GatewayDeclaration
+gateway:
+  address: otel-gateway.observability.svc.cluster.local:4317
+  spill_root: /var/lib/otelcol/spill
+  batch:
+    timeout: 5s
+    send_batch_size: 8192
+  backends:
+    - backend: primary-apm
+      endpoint: apm-otlp.observability.svc.cluster.local:4317
+      delivery:
+        queue_size: 20000
+        retry: true
+        spill: true
+    - backend: cold-archive
+      endpoint: archive-otlp.observability.svc.cluster.local:4317
+      delivery:
+        queue_size: 5000
+        retry: true
+        spill: true
+`)
+
+	config, err := controlplane.CompileGateway(declaration, profiles(t))
+	if err != nil {
+		t.Fatalf("compile the Gateway: %v", err)
+	}
+
+	directories := map[string]string{}
+	for _, backend := range declaration.Backends {
+		storage := "file_storage/" + backend.Name
+
+		extension, defined := config.Extensions[storage].(map[string]any)
+		if !defined {
+			t.Fatalf("Backend %q asked to spill but has no storage extension of its own: %v", backend.Name, config.Extensions)
+		}
+		directory, _ := extension["directory"].(string)
+		if directory == "" {
+			t.Errorf("the storage for Backend %q names no directory: %v", backend.Name, extension)
+		}
+		if owner, taken := directories[directory]; taken {
+			t.Errorf("Backends %q and %q spill into the same directory %s, so they are coupled through it", owner, backend.Name, directory)
+		}
+		directories[directory] = backend.Name
+
+		if !slices.Contains(config.Service.Extensions, storage) {
+			t.Errorf("storage %q is defined but the Gateway does not run it, so the queue it backs is not persistent: %v", storage, config.Service.Extensions)
+		}
+
+		exporter := config.Exporters["otlp/"+backend.Name].(map[string]any)
+		queue, queued := exporter["sending_queue"].(map[string]any)
+		if !queued {
+			t.Fatalf("Backend %q has no sending queue to spill from: %v", backend.Name, exporter)
+		}
+		if queue["storage"] != storage {
+			t.Errorf("Backend %q spills to %v, want its own %q", backend.Name, queue["storage"], storage)
+		}
+	}
+}
+
+func TestABackendCannotSpillWithNowhereToSpillTo(t *testing.T) {
+	// `spill: true` with no `spill_root` would compile a storage directory relative
+	// to wherever the Gateway process happens to have been started — inside the
+	// container image, on no mounted volume, gone on the next restart. That is a
+	// queue that reads as persistent in every config review and is not.
+	_, err := controlplane.CompileGateway(gatewayFrom(t, `apiVersion: guardrail.otel/v1
+kind: GatewayDeclaration
+gateway:
+  address: otel-gateway.observability.svc.cluster.local:4317
+  batch:
+    timeout: 5s
+    send_batch_size: 8192
+  backends:
+    - backend: primary-apm
+      endpoint: apm-otlp.observability.svc.cluster.local:4317
+      delivery:
+        queue_size: 20000
+        spill: true
+`), profiles(t))
+
+	if err == nil {
+		t.Fatal("a Backend spilling with no spill_root compiled, so its queue is persistent nowhere")
+	}
+	for _, want := range []string{"primary-apm", "spill_root"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the error does not mention %q, so a reader cannot see what to add: %v", want, err)
+		}
+	}
+}
+
+func TestABackendCannotSpillWithNoQueueToSpillFrom(t *testing.T) {
+	// Spill is a property of the sending queue, not a separate mechanism: it is
+	// where the queue is kept. Asking for it with `queue_size: 0` compiles a storage
+	// extension, a directory and a mounted volume that nothing ever writes to — the
+	// same class of dead setting the Agent refuses to emit, except this one looks
+	// like durability.
+	_, err := controlplane.CompileGateway(gatewayFrom(t, `apiVersion: guardrail.otel/v1
+kind: GatewayDeclaration
+gateway:
+  address: otel-gateway.observability.svc.cluster.local:4317
+  spill_root: /var/lib/otelcol/spill
+  batch:
+    timeout: 5s
+    send_batch_size: 8192
+  backends:
+    - backend: primary-apm
+      endpoint: apm-otlp.observability.svc.cluster.local:4317
+      delivery:
+        retry: true
+        spill: true
+`), profiles(t))
+
+	if err == nil {
+		t.Fatal("a Backend spilling with no queue compiled, so it has storage nothing writes to")
+	}
+	for _, want := range []string{"primary-apm", "queue_size"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the error does not mention %q, so a reader cannot see what to add: %v", want, err)
+		}
 	}
 }
 
@@ -249,6 +615,58 @@ func TestACompiledGatewayConfigIsInternallyCoherent(t *testing.T) {
 	if err := config.Validate(); err != nil {
 		t.Errorf("the compiled Gateway config does not validate: %v", err)
 	}
+}
+
+func TestACompiledConfigRunsExactlyTheExtensionsItDefines(t *testing.T) {
+	// Referential integrity, extended to the components that are not in a pipeline.
+	// Both directions are silent failures a compiled Gateway would otherwise ship:
+	// a queue naming storage that does not exist stops the collector at load, and
+	// storage the service block never starts is inert — the queue stays in memory
+	// while the config, the mounted volume and every reviewer say it does not.
+	coherent := func() controlplane.CollectorConfig {
+		return controlplane.CollectorConfig{
+			Receivers:  map[string]any{"otlp": map[string]any{}},
+			Processors: map[string]any{"batch": map[string]any{}},
+			Exporters:  map[string]any{"otlp/primary-apm": map[string]any{}},
+			Extensions: map[string]any{"file_storage/primary-apm": map[string]any{}},
+			Service: controlplane.CollectorService{
+				Extensions: []string{"file_storage/primary-apm"},
+				Pipelines: map[string]controlplane.Pipeline{
+					"traces": {
+						Receivers:  []string{"otlp"},
+						Processors: []string{"batch"},
+						Exporters:  []string{"otlp/primary-apm"},
+					},
+				},
+			},
+		}
+	}
+
+	if err := coherent().Validate(); err != nil {
+		t.Fatalf("a config whose extensions line up does not validate: %v", err)
+	}
+
+	t.Run("running an extension nobody defined", func(t *testing.T) {
+		config := coherent()
+		config.Service.Extensions = append(config.Service.Extensions, "file_storage/cold-archive")
+
+		if err := config.Validate(); err == nil {
+			t.Error("a config validated while running an extension it does not define")
+		} else if !strings.Contains(err.Error(), "cold-archive") {
+			t.Errorf("the error does not name the dangling extension: %v", err)
+		}
+	})
+
+	t.Run("defining an extension nobody runs", func(t *testing.T) {
+		config := coherent()
+		config.Service.Extensions = nil
+
+		if err := config.Validate(); err == nil {
+			t.Error("a config validated while defining storage the collector never starts, so the queue it backs is not persistent")
+		} else if !strings.Contains(err.Error(), "primary-apm") {
+			t.Errorf("the error does not name the inert extension: %v", err)
+		}
+	})
 }
 
 func TestABackendThatAsksForNoDurabilityGetsNoDeadSettings(t *testing.T) {

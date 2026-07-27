@@ -1,0 +1,36 @@
+{
+  "resourceMetrics": [
+    {
+      "resource": {
+        "attributes": [
+          {
+            "key": "service.name",
+            "value": { "stringValue": "harness-sample-service" }
+          }
+        ]
+      },
+      "scopeMetrics": [
+        {
+          "scope": { "name": "otel-platform-harness" },
+          "metrics": [
+            {
+              "name": "__METRIC_NAME__",
+              "unit": "1",
+              "sum": {
+                "aggregationTemporality": 2,
+                "isMonotonic": true,
+                "dataPoints": [
+                  {
+                    "asInt": "1",
+                    "startTimeUnixNano": "__START_NANOS__",
+                    "timeUnixNano": "__END_NANOS__"
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

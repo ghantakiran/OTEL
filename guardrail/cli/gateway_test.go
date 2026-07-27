@@ -44,9 +44,10 @@ func TestGatewayWritesCollectorConfigurationForTheSharedGateway(t *testing.T) {
 
 func TestGatewayBlamesTheDeclarationWhenItCannotBeCompiled(t *testing.T) {
 	// The exit-code split `check` established, applied here: 1 is a finding about
-	// this input, 2 is the tool failing. A Gateway declaring two Backends parses
-	// perfectly and still cannot be built (fan-out is C5, #13), so it is a 1.
-	twoBackends := gatewayDeclarationFile(t, `apiVersion: guardrail.otel/v1
+	// this input, 2 is the tool failing. A Backend fanned out to on a Signal that
+	// does not exist parses perfectly and still cannot be built — it would match no
+	// pipeline and receive nothing — so it is a 1.
+	notASignal := gatewayDeclarationFile(t, `apiVersion: guardrail.otel/v1
 kind: GatewayDeclaration
 gateway:
   address: otel-gateway.observability.svc.cluster.local:4317
@@ -58,9 +59,10 @@ gateway:
       endpoint: apm-otlp.observability.svc.cluster.local:4317
     - backend: cold-archive
       endpoint: archive-otlp.observability.svc.cluster.local:4317
+      signals: [metricks]
 `)
 
-	code, out, errOut := run(t, "gateway", "--declaration", twoBackends)
+	code, out, errOut := run(t, "gateway", "--declaration", notASignal)
 
 	if code != 1 {
 		t.Fatalf("exit code = %d, want 1 for a Gateway that cannot be compiled\n%s%s", code, out, errOut)
