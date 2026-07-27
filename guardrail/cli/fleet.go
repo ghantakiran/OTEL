@@ -132,6 +132,11 @@ type reportedService struct {
 	Signals     []string `json:"signals"`
 	Config      string   `json:"collector_config"`
 	Digest      string   `json:"digest"`
+	// ConfigVersion is what this service's Agent will report about itself once the
+	// rollout reaches it — the value to wait for in telemetry, since no status
+	// channel exists to ask (ADR 0010). Distinct from Digest, which hashes the file
+	// rather than the running configuration and is never the same value.
+	ConfigVersion string `json:"config_version"`
 }
 
 type reportedFailure struct {
@@ -154,12 +159,13 @@ func rolloutReportOf(rollout controlplane.Rollout, back controlplane.Writeback) 
 	}
 	for _, service := range rollout.Compiled {
 		report.Compiled = append(report.Compiled, reportedService{
-			ServiceName: service.ServiceName,
-			Tier:        service.Tier,
-			Profile:     service.Profile,
-			Signals:     orEmpty(service.Signals),
-			Config:      service.Path,
-			Digest:      service.Digest,
+			ServiceName:   service.ServiceName,
+			Tier:          service.Tier,
+			Profile:       service.Profile,
+			Signals:       orEmpty(service.Signals),
+			Config:        service.Path,
+			Digest:        service.Digest,
+			ConfigVersion: service.ConfigVersion,
 		})
 	}
 	for _, failed := range rollout.Failed {

@@ -117,6 +117,35 @@ func TestCompileFleetReportsTheRolloutAsJSONForTheScheduledJob(t *testing.T) {
 	}
 }
 
+func TestCompileFleetReportsTheConfigVersionEachAgentWillAnnounce(t *testing.T) {
+	// The scheduled rollout job opens a pull request from this report, and the
+	// question that pull request leaves behind is "did it land?". There is no status
+	// channel to ask (ADR 0010), so the answer is a value to wait for in telemetry —
+	// which has to be in the report, beside the digest and clearly not it.
+	root := sampleFleet(t, map[string]string{
+		"checkout-api": fleetContract("checkout-api", "tier-1"),
+	})
+
+	code, out, errOut := run(t, "compile-fleet", "--format", "json", root)
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0\n%s%s", code, out, errOut)
+	}
+
+	compiled, ok := decodeJSON(t, out)["compiled"].([]any)
+	if !ok || len(compiled) != 1 {
+		t.Fatalf("the JSON report does not list the compiled service:\n%s", out)
+	}
+	service, _ := compiled[0].(map[string]any)
+
+	version, _ := service["config_version"].(string)
+	if version == "" {
+		t.Fatalf("the JSON report carries no config_version, so the pull request the job opens says nothing about what to wait for:\n%s", out)
+	}
+	if version == service["digest"] {
+		t.Errorf("config_version and digest are the same value (%v); one of the two is not hashing what it claims to", version)
+	}
+}
+
 func TestCompileFleetRefusesAFormatNobodyCanRead(t *testing.T) {
 	root := sampleFleet(t, map[string]string{"checkout-api": fleetContract("checkout-api", "tier-1")})
 

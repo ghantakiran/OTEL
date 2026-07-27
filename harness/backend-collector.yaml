@@ -10,11 +10,19 @@
 # `debug` is a core-distribution exporter, like every other component the harness
 # uses. The `file` exporter would be tidier to assert against and lives in contrib,
 # which C1 and C2 deliberately kept out.
+#
+# It listens on OTLP/HTTP as well as OTLP/gRPC, and only the harness needs that.
+# The Gateway exports to a Backend over gRPC, as the compiled config says; the
+# extra port is where the PLATFORM'S OWN telemetry arrives during a harness run,
+# because the collector's periodic gRPC metric reader has no plaintext mode in the
+# pinned version and this bridge has no certificates. See insecure/gateway.yaml.
 receivers:
   otlp:
     protocols:
       grpc:
         endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
 
 exporters:
   debug:

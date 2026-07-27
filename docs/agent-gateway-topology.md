@@ -83,13 +83,15 @@ It does not, yet, and that is now tracked in **#40** rather than deferred a four
 
 Where tail sampling will sit when it lands is already fixed by the shape above: it is a **processor**, upstream of the fan-out, so it drops traces once for every Backend rather than per destination. A Backend wanting an unsampled stream would be a different decision.
 
-### What C7 will read from this
+### What C7 reads from this
 
-C7 (#15) builds the platform's self-observation, and per-Backend isolation is what makes it answerable:
+C7 (#15) built the platform's self-observation on top of this shape, and per-Backend isolation is what makes it answerable:
 
-- **Exporter IDs are Backend names.** `otlp/primary-apm`, not `otlp/1`. Queue depth, send failures and dropped batches come out of the collector labelled by exporter, so "which Backend is behind" is read off the metric rather than inferred.
+- **Exporter IDs are Backend names.** `otlp/primary-apm`, not `otlp/1`. Queue depth, send failures and dropped batches come out of the collector labelled by exporter, so "which Backend is behind" is read off the metric rather than inferred. That naming is now load-bearing rather than cosmetic, and compiling refuses anything that would make the label ambiguous.
 - **Storage instances are separate.** Spill depth per Backend is a real per-Backend signal, because the directories are not shared.
 - **The fan-out is per Signal**, so a Backend's failure rate is comparable only against the Signals it actually receives.
+
+Where those numbers arrive, and the queries to watch, are in [platform-self-observation.md](./platform-self-observation.md).
 
 ## The two halves cannot drift
 
@@ -140,9 +142,11 @@ processors:
             - context: scope
               statements:
                 - delete_matching_keys(attributes, "^otel\\.guardrail\\.")
+                - delete_matching_keys(attributes, "^otel\\.platform\\.")
             - context: log
               statements:
                 - delete_matching_keys(attributes, "^otel\\.guardrail\\.")
+                - delete_matching_keys(attributes, "^otel\\.platform\\.")
         metric_statements:
             - context: resource
               statements:
@@ -153,9 +157,11 @@ processors:
             - context: scope
               statements:
                 - delete_matching_keys(attributes, "^otel\\.guardrail\\.")
+                - delete_matching_keys(attributes, "^otel\\.platform\\.")
             - context: datapoint
               statements:
                 - delete_matching_keys(attributes, "^otel\\.guardrail\\.")
+                - delete_matching_keys(attributes, "^otel\\.platform\\.")
         trace_statements:
             - context: resource
               statements:
@@ -166,12 +172,15 @@ processors:
             - context: scope
               statements:
                 - delete_matching_keys(attributes, "^otel\\.guardrail\\.")
+                - delete_matching_keys(attributes, "^otel\\.platform\\.")
             - context: span
               statements:
                 - delete_matching_keys(attributes, "^otel\\.guardrail\\.")
+                - delete_matching_keys(attributes, "^otel\\.platform\\.")
             - context: spanevent
               statements:
                 - delete_matching_keys(attributes, "^otel\\.guardrail\\.")
+                - delete_matching_keys(attributes, "^otel\\.platform\\.")
 exporters:
     otlp/cold-archive:
         endpoint: archive-otlp.observability.svc.cluster.local:4317
@@ -238,6 +247,22 @@ service:
             exporters:
                 - otlp/primary-apm
                 - otlp/cold-archive
+    telemetry:
+        resource:
+            deployment.environment: production
+            otel.platform.config_version: sha256:8d0d8ff0403cfc2053dc46746dfa5565dcae53da315de2f1557bd1ba7d4af6e5
+            service.name: otel-gateway
+            service.namespace: observability
+            service.version: 0.127.0
+        metrics:
+            level: normal
+            readers:
+                - periodic:
+                    exporter:
+                        otlp:
+                            endpoint: https://apm-otlp.observability.svc.cluster.local:4317
+                            protocol: grpc
+                    interval: 30000
 ```
 
 Exit `0` compiled, `1` the Gateway cannot be compiled as declared, `2` the compiler could not run — the same split `check` and `compile` make.
@@ -252,6 +277,7 @@ Note what differs from an Agent's config, and why:
 - **`transform/guardrail`.** The **Pipeline Guardrails**, compiled from `guardrail/standards.yaml` — the same catalog `otel-guardrail check` enforces before deploy. It runs here and in no Agent: Agents do no enforcement (ADR 0007), and this is the only place that sees the whole fleet. It sits upstream of the fan-out, so a record is judged once rather than once per Backend. See [pipeline-guardrails.md](./pipeline-guardrails.md).
 - **`delivery` is per Backend**, not per Gateway. One slow or unreachable Backend must not block exports to the others (ADR 0010).
 - **`extensions`.** The spill storage, one instance per spilling Backend. An Agent's config has none, and the field is omitted entirely rather than emitted empty.
+- **`service.telemetry`.** What the Gateway says about *itself* — its `otel.platform.config_version` and its own queue, export-failure and drop counters — and the route it says it on, which goes straight to one Backend and through none of the pipelines above. An Agent has this block too, aimed at the Gateway. See [platform-self-observation.md](./platform-self-observation.md) and ADR 0016.
 
 ## What refuses to compile
 
@@ -274,7 +300,7 @@ Note what differs from an Agent's config, and why:
 bash harness/run.sh          # add --keep to leave it running
 ```
 
-Needs Docker, `docker compose`, and Go. Takes about two minutes. It stands up **two Agents**, a Gateway, **three Backend stand-ins** and a sample service, and asserts telemetry crosses every hop — with one of the three Backends deliberately unreachable throughout.
+Needs Docker, `docker compose`, and Go. Takes about eight minutes — the platform's own telemetry is on a 30-second timer, which is the compiled interval and deliberately not shortened for the harness. It stands up **three Agents** (one of them a rollout of the first), a Gateway, **three Backend stand-ins** and a sample service, and asserts telemetry crosses every hop — with one of the three Backends deliberately unreachable throughout. 44 assertions.
 
 **Both collector configs are compiled by the binary under test**, into `harness/generated/`, and mounted verbatim. A harness proving a hand-written config works would prove nothing about the compiler.
 
@@ -292,6 +318,10 @@ It asserts, in order:
 6. **The Pipeline Guardrail tags a non-compliant stream, and drops nothing.** Nothing the compliant Agent sent carries an `otel.guardrail` attribute — asserted first, while no non-compliant telemetry exists. A **second Agent**, compiled from `harness/drifted-contract.yaml` (which declares one of the three resource attributes S1 requires), then emits a span. It **arrives** at the Backend by trace ID, carrying `otel.guardrail.violation.S1=block`, `otel.guardrail.violation.S3=warn` and `otel.guardrail.blocking=true`. Neither Agent's compiled config mentions any of that, so the Gateway is the only thing that could have written it.
 7. **The archive had no container at all** while 3–6 ran, so those assertions really were made against a Gateway holding a down Backend.
 8. **The archive's own queue drains when it comes up.** A span emitted while the archive had no container reaches it once it is started, which it cannot have had before: the Gateway held that span in *that Backend's* queue while serving the other two normally.
+9. **Both compiled configs start with no overlay at all**, on their pinned images. This is the only assertion that exercises the self-telemetry reader exactly as compiled, and it is here because the plaintext concession below has to restate that reader rather than merge into it.
+10. **The platform's own telemetry arrives, saying what is running.** The Agent's and the Gateway's `otel.platform.config_version` both reach a Backend, they are different values, and each is the one the compiler stamped into that file — read out of the compiled config rather than written into the harness.
+11. **Per-Backend back-pressure, in numbers.** While cold-archive is unreachable, `otelcol_exporter_queue_size{exporter="otlp/cold-archive"}` is holding batches while `otlp/primary-apm`'s is zero and its `sent_spans` is rising. Metric name and exporter label are read from the same data point, so a log where the two never co-occurred cannot pass.
+12. **A Rollout, confirmed by telemetry.** The same Contract is recompiled against `harness/rolled-out-profiles.yaml` — one field different — the old Agent is stopped, the new one started, and the **new** `config_version` appears in a Backend. No status endpoint was polled, because there is not one.
 
 ## What the harness proves, and what it does not
 
@@ -304,11 +334,17 @@ It asserts, in order:
 - **Fan-out is per Signal**, observed on running Backends in both directions.
 - **One Backend being unreachable does not stop the others receiving**, and what that Backend missed was held in its own queue rather than dropped — for as long as its own `retry_on_failure` budget allows, which is the collector's 300s default since no Backend declares otherwise.
 - **The Pipeline Guardrails run, tag the right records, and leave the rest alone** — observed on a real contrib collector, on a stream produced by a compiled Agent rather than hand-crafted. Including that a `block` Standard does **not** drop: the non-compliant span arrives.
+- **Both compiled configs start on their pinned images with nothing added at all**, which is a stronger claim than the overlaid runs make and the only one that covers the self-telemetry reader as compiled.
+- **The platform's own telemetry escapes and identifies itself**, from both tiers, on a route that is not the pipeline it reports on — and a Rollout driven by a Pipeline Profile change is confirmed by the new `config_version` appearing, with no status channel involved.
+- **Back-pressure is attributed to the Backend that has it.** One Backend's queue holds while the other's stays at zero and keeps exporting, read off the same data point rather than from two independent greps.
 
 **Does not prove:**
 
 - **That a real Backend ingests any of this.** All three stand-ins are collectors with a `debug` exporter. They receive OTLP exactly as a Backend would and print what arrived — so this proves telemetry crossed the wire out of the Gateway, and nothing about how a real APM, metrics store or archive would ingest, index, or render it.
-- **That the compiled configs work under TLS.** The harness adds exactly one thing to each compiled config: `tls: insecure: true`, in `harness/insecure/*.yaml`. The compiled configs are written for a cluster with certificates; the harness runs on a docker bridge with none. Nothing here exercises the TLS path a real deployment uses. The concession is kept to one visible file per collector precisely so it cannot be mistaken for something the compiler produces.
+- **That the compiled configs work under TLS.** The harness overlays `tls: insecure: true` per exporter, in `harness/insecure/*.yaml`. The compiled configs are written for a cluster with certificates; the harness runs on a docker bridge with none. Nothing here exercises the TLS path a real deployment uses. The concession is kept to one visible file per collector precisely so it cannot be mistaken for something the compiler produces.
+- **That the compiled self-telemetry reader runs as compiled.** This is the biggest single concession and it is worth reading. The compiled reader is a periodic **gRPC** OTLP client to `https://…`; in the pinned collector that has no plaintext mode — `insecure: true` is accepted and ignored — and `readers:` is a *list*, which confmap replaces rather than merges. So the harness restates the whole reader over OTLP/HTTP, and opens an HTTP port on the Gateway and the Backend stand-ins to receive it. What still comes from the compiled file is the **resource**, including the `config_version` every assertion turns on, and `agent-as-compiled`/`gateway-as-compiled` start the compiled files with no overlay at all — which is what catches a reader that does not load. Recorded in **#48**.
+- **That the platform's own telemetry survives an outage of any size.** One unreachable Backend for a couple of minutes is not a Gateway under memory pressure, a queue at capacity, or a Backend that accepts connections and then stalls. What is shown is that the route exists and is not behind the pipeline; what is not shown is how it behaves when the thing it reports on is failing hard. Recorded in **#49**.
+- **That a Rollout is confirmed across a real fleet.** The drill replaces one Agent, of one service, on one host. "Fleet-wide" over hundreds of hosts — partial rollouts, stragglers, a service whose Agent never restarts — is not in reach of five containers. Recorded in **#51**.
 - **What happens when a Backend is SLOW rather than ABSENT.** This is the important gap. An unreachable Backend fails fast; one that accepts a connection and then takes 30 seconds per batch holds the exporter's workers, and how that interacts with the `batch` processor upstream of all three exporters is untested. That case is C7 (#15).
 - **Anything under sustained load.** One span and one metric do not fill a 20,000-batch queue or approach a 1024 MiB `memory_limiter`, and never reach the point where a queue is full and drops — which is where isolation is actually tested.
 - **That spill survives a Gateway restart.** The extensions load, start, and each open their own directory; persistent queues are initialised per Backend per Signal. But the harness never restarts the Gateway, and it mounts `spill_root` as **tmpfs** — so the one property spill exists for is the one property this cannot show.

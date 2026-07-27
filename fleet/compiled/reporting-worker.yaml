@@ -36,6 +36,8 @@ processors:
             - action: upsert
               key: service.version
               value: 0.9.3
+            - action: delete
+              pattern: ^otel\.platform\.
 exporters:
     otlp/gateway:
         endpoint: otel-gateway.observability.svc.cluster.local:4317
@@ -64,3 +66,20 @@ service:
                 - batch
             exporters:
                 - otlp/gateway
+    telemetry:
+        resource:
+            deployment.environment: production
+            otel.platform.config_version: sha256:be9ad6d0ea22891cbb19beb56011d423e6476f0cb2dc971b3304fde7df8b88eb
+            service.instance.id: reporting-worker-b32f01
+            service.name: reporting-worker
+            service.namespace: analytics
+            service.version: 0.9.3
+        metrics:
+            level: normal
+            readers:
+                - periodic:
+                    exporter:
+                        otlp:
+                            endpoint: https://otel-gateway.observability.svc.cluster.local:4317
+                            protocol: grpc
+                    interval: 30000

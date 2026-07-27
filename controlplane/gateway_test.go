@@ -179,6 +179,12 @@ gateway:
       endpoint: apm-otlp.observability.svc.cluster.local:4317
     - backend: cold-archive
       endpoint: archive-otlp.observability.svc.cluster.local:4317
+  self_telemetry:
+    backend: primary-apm
+    resource_attributes:
+      service.name: otel-gateway
+      service.version: 0.127.0
+      deployment.environment: production
 `)
 
 	config, err := controlplane.CompileGateway(declaration, profiles(t), orgStandards(t))
@@ -219,6 +225,12 @@ gateway:
     - backend: metrics-store
       endpoint: metrics-otlp.observability.svc.cluster.local:4317
       signals: [metrics]
+  self_telemetry:
+    backend: primary-apm
+    resource_attributes:
+      service.name: otel-gateway
+      service.version: 0.127.0
+      deployment.environment: production
 `)
 
 	config, err := controlplane.CompileGateway(declaration, profiles(t), orgStandards(t))
@@ -314,6 +326,12 @@ gateway:
     - backend: metrics-store
       endpoint: metrics-otlp.observability.svc.cluster.local:4317
       signals: [metrics]
+  self_telemetry:
+    backend: metrics-store
+    resource_attributes:
+      service.name: otel-gateway
+      service.version: 0.127.0
+      deployment.environment: production
 `), profiles(t), orgStandards(t))
 
 	if err == nil {
@@ -424,6 +442,12 @@ gateway:
       delivery:
         queue_size: 500
         retry: false
+  self_telemetry:
+    backend: primary-apm
+    resource_attributes:
+      service.name: otel-gateway
+      service.version: 0.127.0
+      deployment.environment: production
 `)
 
 	config, err := controlplane.CompileGateway(declaration, profiles(t), orgStandards(t))
@@ -483,6 +507,12 @@ gateway:
         queue_size: 5000
         retry: true
         spill: true
+  self_telemetry:
+    backend: primary-apm
+    resource_attributes:
+      service.name: otel-gateway
+      service.version: 0.127.0
+      deployment.environment: production
 `)
 
 	config, err := controlplane.CompileGateway(declaration, profiles(t), orgStandards(t))
@@ -753,6 +783,10 @@ func TestACompiledConfigRunsExactlyTheExtensionsItDefines(t *testing.T) {
 						Exporters:  []string{"otlp/primary-apm"},
 					},
 				},
+				// A collector that runs pipelines and reports nothing about itself is
+				// not coherent (ADR 0016), so a config assembled here to ask a
+				// question about extensions has to be coherent in that respect too.
+				Telemetry: selfObserving(),
 			},
 		}
 	}
@@ -807,6 +841,10 @@ func TestAQueueMaySpillOnlyToStorageTheCollectorRuns(t *testing.T) {
 						Exporters:  []string{"otlp/primary-apm"},
 					},
 				},
+				// A collector that runs pipelines and reports nothing about itself is
+				// not coherent (ADR 0016), so a config assembled here to ask a
+				// question about extensions has to be coherent in that respect too.
+				Telemetry: selfObserving(),
 			},
 		}
 	}
@@ -856,12 +894,33 @@ gateway:
   backends:
     - backend: primary-apm
       endpoint: apm-otlp.observability.svc.cluster.local:4317
+  self_telemetry:
+    backend: primary-apm
+    resource_attributes:
+      service.name: otel-gateway
+      service.version: 0.127.0
+      deployment.environment: production
 `))
 
 	for _, dead := range []string{"sending_queue", "retry_on_failure", "memory_limiter"} {
 		if strings.Contains(rendered, dead) {
 			t.Errorf("the compiled Gateway carries a %s the declaration never asked for:\n%s", dead, rendered)
 		}
+	}
+}
+
+// selfObserving is the smallest `service.telemetry` block a coherent compiled
+// config can carry: an identity that names the configuration it is running, and
+// somewhere to say it. Tests that assemble a config by hand to ask about
+// something else still need one, because a collector nobody can see is refused
+// (ADR 0016) — the same reason a config that runs no pipelines is.
+func selfObserving() *controlplane.CollectorTelemetry {
+	return &controlplane.CollectorTelemetry{
+		Resource: map[string]string{"otel.platform.config_version": "sha256:assembled-by-hand"},
+		Metrics: controlplane.TelemetryMetrics{
+			Level:   "normal",
+			Readers: []any{map[string]any{"periodic": map[string]any{}}},
+		},
 	}
 }
 

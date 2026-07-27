@@ -80,6 +80,18 @@ _Avoid_: Independence, decoupling, per-backend config
 Keeping a Backend's sending queue on disk rather than in memory, so telemetry queued for a Backend that is not answering survives the Gateway restarting. Declared per Backend; each Spilling Backend writes to its own directory under the Gateway's one spill root. It is the single reason the Gateway runs the collector's contrib distribution rather than core (ADR 0014).
 _Avoid_: Disk buffer, persistence, dead-letter queue, overflow
 
+**Self-Telemetry**:
+The OTEL an Agent or the Gateway emits about *itself* — its Config Version, its queue depths, its export failures and its drops — as opposed to the fleet's telemetry it is carrying. It leaves by its own OTLP client with no queue, no retry and no batching, deliberately not through the pipeline it reports on, because the outage it exists to describe is exactly what would hold it up (ADR 0010, ADR 0016). It is why there is no health API, no heartbeat and no status back-channel on this platform, and none is to be built.
+_Avoid_: Health check, heartbeat, metrics endpoint, internal metrics, status
+
+**Config Version**:
+The identity of one compiled collector configuration, as the collector running it reports it in its own Self-Telemetry: the sha256 of that configuration with the Config Version attribute itself excluded. It identifies *what is running*, never what it was compiled from — an input that does not reach the compiled config does not change it. A Rollout is confirmed when every service's Agent, and the Gateway, report the Config Version the Rollout Manifest recorded for them. Distinct from the Manifest's **digest**, which hashes the compiled *file*, header and stamp included, and answers whether that file is still the one the Rollout wrote; the two are never equal and only the Config Version can be compared against telemetry.
+_Avoid_: Config hash, revision, generation, version (bare), digest
+
+**Back-Pressure**:
+What a collector reports when the next hop is not keeping up: a sending queue filling, exports failing, records dropped. At the Gateway it is per Backend and attributed by that Backend's exporter, which is named after it — so "which Backend is behind?" is answered rather than inferred, and one Backend's back-pressure is visibly not another's (ADR 0014, ADR 0016).
+_Avoid_: Lag, congestion, throttling, overload
+
 **Gateway Declaration**:
 The org's single description of the shared Gateway — the address Agents reach it on, how it rebatches, where it Spills to, and which Backends it exports to. There is exactly one, because there is exactly one Gateway tier: unlike a Pipeline Profile it is neither per service nor per tier, and nothing selects it. Facts that genuinely vary by Service Tier (the tail-sampling budget) stay in the Profile.
 _Avoid_: Gateway Profile, gateway config, gateway manifest
@@ -182,6 +194,11 @@ _Avoid_: Cutoff, go-live, launch date
 - **Backend Isolation** is what makes fanning out from one **Gateway** safe: a **Backend** that stops answering fills its own queue and **Spills** to its own directory, and the others keep exporting.
 - **Spill** is the one thing on this platform that is not in the collector's core distribution, so the **Gateway** runs a contrib build while every **Agent** stays core.
 - The **Control Plane** **Compiles** the **Gateway Declaration** into the **Gateway**'s configuration, cross-checked against every **Pipeline Profile**: the address the Gateway answers on must be where the Profiles forward **Agents**.
+- Every **Agent** and the **Gateway** emit **Self-Telemetry**; a **Rollout** is confirmed when each reports the **Config Version** the **Rollout Manifest** recorded for it, and by nothing else — there is no status channel to ask.
+- **Self-Telemetry** leaves by a path that is not the pipeline it reports on: an **Agent**'s goes to the **Gateway** on its own client, and the **Gateway**'s goes straight to one **Backend**, never through the **Gateway**'s own pipelines.
+- An **Agent**'s **Self-Telemetry** carries the identity its **Telemetry Contract** declares, so a **Pipeline Guardrail** judges it exactly as it judges that service — no exemption, because an exemption would be a resource attribute and a service can write one.
+- The **Gateway**'s own identity is declared in the **Gateway Declaration** and checked against every `block` **Standard** the **Gateway** enforces at the pipeline: it does not **Compile** if the **Gateway** would tag the fleet for something its own telemetry omits.
+- **Back-Pressure** at the **Gateway** is attributed per **Backend**, which is what **Backend Isolation** looks like from outside: one **Backend**'s queue filling while the others' stay empty.
 
 ## Example dialogue
 

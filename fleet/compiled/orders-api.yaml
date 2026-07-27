@@ -36,6 +36,8 @@ processors:
             - action: upsert
               key: service.version
               value: 5.1.0
+            - action: delete
+              pattern: ^otel\.platform\.
 exporters:
     otlp/gateway:
         endpoint: otel-gateway.observability.svc.cluster.local:4317
@@ -73,3 +75,20 @@ service:
                 - batch
             exporters:
                 - otlp/gateway
+    telemetry:
+        resource:
+            deployment.environment: production
+            otel.platform.config_version: sha256:df1d11f63fd44dff750eb7bf20092037b6a05e6f1f1f0193198cedc870cf5c36
+            service.instance.id: orders-api-4c1e8a
+            service.name: orders-api
+            service.namespace: fulfilment
+            service.version: 5.1.0
+        metrics:
+            level: normal
+            readers:
+                - periodic:
+                    exporter:
+                        otlp:
+                            endpoint: https://otel-gateway.observability.svc.cluster.local:4317
+                            protocol: grpc
+                    interval: 30000
