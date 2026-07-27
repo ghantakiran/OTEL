@@ -1,0 +1,94 @@
+# The org's Standard catalog — every Standard, its Severity, where it is
+# enforced, and the requirement it checks.
+#
+# THIS IS THE SOURCE OF TRUTH FOR BOTH ENFORCEMENT POINTS, and that is the whole
+# reason the file exists.
+#
+# A Standard is authored as Rego (ADR 0002). A collector cannot evaluate Rego, so
+# a Pipeline Guardrail cannot run the Rego body — it has to be collector
+# processors. The tempting move is to write the pipeline check separately, which
+# gives one Standard two definitions that drift: the failure this repository has
+# already removed three times (the tier taxonomy #28, the Waiver register #32, the
+# summary line #33). So the *requirement* moves out of the Rego body and into this
+# document, and both consumers read it:
+#
+#   Preflight Guardrail   the .rego receives this as the Rego data document
+#                         `data.otel.standards` and reads its Severity and its
+#                         requirement from there. No .rego file names an attribute
+#                         or a Severity, and tests enforce that.
+#   Pipeline Guardrail    the Control Plane reads the same entries, selects the
+#                         ones enforced at `pipeline`, and compiles them into the
+#                         Gateway's collector processors (ADR 0015).
+#
+# It is the same move guardrail/tiers.yaml already made for the Service Tier
+# taxonomy: a document the platform owns, that policy consumes and never defines.
+#
+# FIELDS
+#
+#   standard      The Standard's id, and it is not just a label. It has to be three
+#                 things at once: a segment of the attribute name the Gateway tags
+#                 telemetry with, a Rego data key (case-sensitive), and the last
+#                 segment of this Standard's Rego package name (which cannot carry
+#                 case, or a hyphen). Letters, digits and underscores.
+#   title         One line saying what the Standard requires, in words. Nothing
+#                 computes on it; it is here for whoever opens this file, which is
+#                 what an operator does when a Guardrail Tag names a Standard they
+#                 do not recognise. Optional, like a Backend's `description:`.
+#   severity      info | warn | block. The enforcement weight when violated
+#                 (ADR 0003). Only `block` fails a build; at the Gateway it decides
+#                 how loudly the violation is marked and never whether the
+#                 telemetry survives (ADR 0015).
+#   enforced_at   preflight | pipeline, or both. Not every requirement is checkable
+#                 at both, so each Standard says. An absent or unrecognised
+#                 enforcement point is a hard error against the catalog, the same
+#                 treatment an absent Severity gets.
+#   requires      The requirement itself, by kind. Exactly one kind per Standard.
+#
+# REQUIREMENT KINDS
+#
+#   resource_attributes     A list of resource attribute keys that must be present.
+#                           Checkable at BOTH points: Preflight asks whether the
+#                           Telemetry Contract declares them, the Gateway asks
+#                           whether the live record carries them.
+#   tier_mandatory_signals  The Signals a service's Service Tier makes mandatory,
+#                           read from the Service Tier Taxonomy. PREFLIGHT ONLY. A
+#                           collector sees one record at a time and cannot tell
+#                           "this service emits no metrics" from "no metric has
+#                           arrived in the last second"; that needs statistics over
+#                           time, which a processor does not keep. A Standard whose
+#                           only requirement is this one and which declares
+#                           `pipeline` is REFUSED when the catalog loads rather than
+#                           compiled into something weaker that looks enforced.
+apiVersion: guardrail.otel/v1
+kind: StandardCatalog
+
+standards:
+  - standard: S1
+    title: Every service must declare the org's required resource attributes.
+    severity: block
+    enforced_at: [preflight, pipeline]
+    requires:
+      resource_attributes:
+        - service.name
+        - service.version
+        - deployment.environment
+
+  - standard: S2
+    title: A Service Tier determines which Signals are mandatory.
+    severity: block
+    # Preflight only, and deliberately. See `tier_mandatory_signals` above: whether
+    # a service emits a Signal at all is a statement about a stream over time, and
+    # the Gateway inspects one record at a time. Declaring `pipeline` here would not
+    # compile — which is the honest outcome, not a gap.
+    enforced_at: [preflight]
+    requires:
+      tier_mandatory_signals: true
+
+  - standard: S3
+    title: Every service should declare the org's recommended resource attributes.
+    severity: warn
+    enforced_at: [preflight, pipeline]
+    requires:
+      resource_attributes:
+        - service.namespace
+        - service.instance.id

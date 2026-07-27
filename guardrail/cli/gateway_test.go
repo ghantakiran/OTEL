@@ -106,6 +106,47 @@ func TestGatewayMarksItsOutputAsGenerated(t *testing.T) {
 	}
 }
 
+func TestGatewayCompilesThePipelineEnforcedStandardsIntoTheConfig(t *testing.T) {
+	// The Gateway is where Pipeline Guardrails run (#14). The catalog the org
+	// enforces before deploy is the catalog compiled in here, so a Standard has
+	// one definition and the same id at both points.
+	_, out, _ := run(t, "gateway")
+
+	if !strings.Contains(out, "transform/guardrail") {
+		t.Errorf("the compiled Gateway runs no Pipeline Guardrail:\n%s", out)
+	}
+	if !strings.Contains(out, "otel.guardrail.violation.S1") {
+		t.Errorf("the compiled Gateway does not enforce S1, which the catalog marks enforced_at: [preflight, pipeline]:\n%s", out)
+	}
+}
+
+func TestGatewayFailsAsAToolWhenAStandardCannotBeEnforcedAtThePipeline(t *testing.T) {
+	// A Standard claiming an enforcement point it cannot deliver is a broken
+	// catalog — the platform team's problem, not a finding about the Gateway
+	// Declaration in front of it. Exit 2, the same split an absent Severity makes.
+	notExpressible := filepath.Join(t.TempDir(), "standards.yaml")
+	if err := os.WriteFile(notExpressible, []byte(`apiVersion: guardrail.otel/v1
+kind: StandardCatalog
+standards:
+  - standard: S2
+    severity: block
+    enforced_at: [pipeline]
+    requires:
+      tier_mandatory_signals: true
+`), 0o600); err != nil {
+		t.Fatalf("write the Standard catalog: %v", err)
+	}
+
+	code, _, errOut := run(t, "gateway", "--standards", notExpressible)
+
+	if code != 2 {
+		t.Fatalf("exit code = %d, want 2 — a Standard that cannot be compiled is a broken catalog, not a finding about the Gateway", code)
+	}
+	if !strings.Contains(errOut, "S2") {
+		t.Errorf("stderr does not name the Standard at fault:\n%s", errOut)
+	}
+}
+
 func gatewayDeclarationFile(t *testing.T, body string) string {
 	t.Helper()
 

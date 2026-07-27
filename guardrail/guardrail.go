@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io/fs"
 	"path"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -26,13 +27,15 @@ import (
 //go:embed policies
 var builtinPolicies embed.FS
 
-// StandardPolicies is the Standard catalog shipped with the CLI.
+// StandardPolicies is the Rego shipped with the CLI: how each Standard is
+// detected. What each Standard requires is CentralStandards, a separate document
+// the policies read as data — see catalog.go.
 func StandardPolicies() fs.FS {
-	catalog, err := fs.Sub(builtinPolicies, "policies")
+	policies, err := fs.Sub(builtinPolicies, "policies")
 	if err != nil {
-		panic(fmt.Sprintf("embedded Standard catalog is unreadable: %v", err))
+		panic(fmt.Sprintf("the embedded Standard policies are unreadable: %v", err))
 	}
-	return catalog
+	return policies
 }
 
 // Severity is the enforcement weight of a Standard when it is violated.
@@ -114,6 +117,7 @@ type Result struct {
 type Preflight struct {
 	standards rego.PreparedEvalQuery
 	taxonomy  *Taxonomy
+	catalog   *StandardCatalog
 	waivers   *WaiverRegister
 	schedule  *EnforcementSchedule
 	appeared  FirstAppearance
@@ -150,6 +154,15 @@ func WithTaxonomy(taxonomy *Taxonomy) Option {
 	return func(p *Preflight) { p.taxonomy = taxonomy }
 }
 
+// WithStandardCatalog gives the Guardrail the org's Standard catalog — what each
+// Standard requires, at what Severity, and where it is enforced. Like the
+// taxonomy and unlike Waivers, it is not optional: it defaults to the catalog
+// compiled into this binary, because a policy with no catalog entry reads an
+// absent data document and quietly enforces nothing.
+func WithStandardCatalog(catalog *StandardCatalog) Option {
+	return func(p *Preflight) { p.catalog = catalog }
+}
+
 // WithEnforcementSchedule gives the Guardrail the org's published Enforcement
 // Epoch and graduation deadlines, so a legacy service is held back from a
 // blocking Standard until that Standard graduates. It requires
@@ -165,24 +178,31 @@ func WithFirstAppearance(appeared FirstAppearance) Option {
 	return func(p *Preflight) { p.appeared = appeared }
 }
 
-// NewPreflight compiles a Standard catalog into a Preflight Guardrail. The
-// catalog is a filesystem of .rego files; use StandardPolicies for the built-in one.
-func NewPreflight(catalog fs.FS, options ...Option) (*Preflight, error) {
+// NewPreflight compiles the Standard policies into a Preflight Guardrail.
+//
+// `policies` is a filesystem of .rego files — how each Standard is detected in a
+// declared Contract; use StandardPolicies for the built-in one. WHAT each
+// Standard requires and how severely is the Standard catalog, a separate
+// document the policies read as data (WithStandardCatalog). The two are not the
+// same thing and this constructor takes both.
+func NewPreflight(policies fs.FS, options ...Option) (*Preflight, error) {
 	regoOptions := []func(*rego.Rego){rego.Query("data.otel.guardrail.violations")}
 
-	err := fs.WalkDir(catalog, ".", func(name string, entry fs.DirEntry, err error) error {
+	sources := map[string]string{}
+	err := fs.WalkDir(policies, ".", func(name string, entry fs.DirEntry, err error) error {
 		if err != nil || entry.IsDir() || path.Ext(name) != ".rego" {
 			return err
 		}
-		source, err := fs.ReadFile(catalog, name)
+		source, err := fs.ReadFile(policies, name)
 		if err != nil {
 			return err
 		}
+		sources[name] = string(source)
 		regoOptions = append(regoOptions, rego.Module(name, string(source)))
 		return nil
 	})
 	if err != nil {
-		return nil, fmt.Errorf("read Standard catalog: %w", err)
+		return nil, fmt.Errorf("read the Standard policies: %w", err)
 	}
 
 	preflight := &Preflight{}
@@ -196,11 +216,33 @@ func NewPreflight(catalog fs.FS, options ...Option) (*Preflight, error) {
 		}
 		preflight.taxonomy = taxonomy
 	}
+	if preflight.catalog == nil {
+		declared, err := CentralStandards()
+		if err != nil {
+			return nil, fmt.Errorf("load the Standard catalog: %w", err)
+		}
+		preflight.catalog = declared
+	}
 
-	// The taxonomy reaches the Standards as a Rego *data* document, not as part of
-	// the input: input is the Contract under test, data is what the org has
-	// decided. A Standard reads data.otel.taxonomy; none of them defines a tier.
-	store := inmem.NewFromObject(map[string]any{"otel": map[string]any{"taxonomy": preflight.taxonomy.asRegoData()}})
+	// The policies and the catalog are two halves of one Standard, and a caller can
+	// assemble any pair of them. A half that does not meet its other half does not
+	// fail — it reports nothing, because an absent Rego data document is silence
+	// rather than an error. So the pair is checked here, the one place that sees
+	// the pair somebody actually assembled.
+	if err := preflight.catalog.matches(sources); err != nil {
+		return nil, fmt.Errorf("the Standard policies and the Standard catalog do not match: %w", err)
+	}
+
+	// The taxonomy and the Standard catalog reach the Standards as Rego *data*
+	// documents, not as part of the input: input is the Contract under test, data
+	// is what the org has decided. A Standard reads data.otel.taxonomy and
+	// data.otel.standards; none of them defines a tier, a required attribute or a
+	// Severity. That is what lets the Gateway compile the same catalog into
+	// Pipeline Guardrails without a second definition of anything (ADR 0015).
+	store := inmem.NewFromObject(map[string]any{"otel": map[string]any{
+		"taxonomy":  preflight.taxonomy.asRegoData(),
+		"standards": preflight.catalog.asRegoData(),
+	}})
 	regoOptions = append(regoOptions, rego.Store(store))
 
 	standards, err := rego.New(regoOptions...).PrepareForEval(context.Background())
@@ -248,6 +290,17 @@ func (p *Preflight) Check(ctx context.Context, c contract.Contract) (Result, err
 		if err := v.Severity.validate(v.Standard); err != nil {
 			return Result{}, err
 		}
+		// `enforced_at` has to be honoured here as well as at the Gateway, or it is
+		// a setting one layer obeys and the other ignores. The Rego aggregator picks
+		// up every policy in the catalog directory without registration, so a
+		// Standard moved to `pipeline` while its .rego stayed behind would go on
+		// failing builds at a point the catalog says it is not enforced at. Stopping
+		// the run is the same treatment an absent Severity gets, and for the same
+		// reason: quietly discarding the violation instead would leave a Standard
+		// nobody notices has died.
+		if err := p.enforcedHere(v.Standard); err != nil {
+			return Result{}, err
+		}
 	}
 
 	// A Waiver is not a Standard, so it does not get a say in what the catalog
@@ -288,6 +341,26 @@ func (p *Preflight) Check(ctx context.Context, c contract.Contract) (Result, err
 		return a.Message < b.Message
 	})
 	return Result{Violations: violations}, nil
+}
+
+// enforcedHere rejects a violation from a Standard the catalog does not enforce
+// at preflight — including one the catalog does not declare at all, which is a
+// policy reading an absent data document and reporting against nothing.
+func (p *Preflight) enforcedHere(standard string) error {
+	for _, declared := range p.catalog.Standards() {
+		if declared.ID != standard {
+			continue
+		}
+		if slices.Contains(declared.EnforcedAt, EnforcedAtPreflight) {
+			return nil
+		}
+		return fmt.Errorf(
+			"Standard %s reported a violation, but the Standard catalog declares it enforced_at %v — either enforce it at %q or remove its policy from the catalog directory",
+			standard, declared.EnforcedAt, EnforcedAtPreflight)
+	}
+	return fmt.Errorf(
+		"Standard %s reported a violation, but the Standard catalog does not declare it: its policy is reading an absent catalog entry, so what it required and how severely is undefined",
+		standard)
 }
 
 // deferForLegacyService holds a legacy service back from each blocking Standard

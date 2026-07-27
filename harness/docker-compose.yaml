@@ -13,14 +13,23 @@
 # Backend for the whole run. That is the scenario #13 is about — the other two must
 # keep receiving throughout, and run.sh asserts they do.
 #
+# TWO AGENTS, and the difference between them is the whole Pipeline Guardrail test
+# (#14). `agent` is compiled from a Telemetry Contract that meets every Standard;
+# `agent-drifted` from one that declares a single resource attribute where S1
+# requires three. Both are ordinary compiled Agents doing no enforcement — what
+# differs is only what they stamp, so what the Gateway tags is a property of the
+# telemetry rather than of the Agent. run.sh starts `agent-drifted` only once the
+# compliant assertions are done, so the Backend's log cannot match either way.
+#
 # TWO COLLECTOR IMAGES, and the split is the point (ADR 0014):
 #
 #   gateway   opentelemetry-collector-CONTRIB. Its compiled config names
 #             file_storage, the spill extension, which is not in the core
 #             distribution. This is the constraint the ADR records, made visible:
 #             on the core image below, this same config fails at load.
-#   agent     opentelemetry-collector, CORE. The Agent needs no spill and stays
-#             core-only, so the harness keeps proving the compiled Agent config
+#   agent     opentelemetry-collector, CORE. Both Agents run this. An Agent needs
+#             no spill and no `transform` — it does no enforcement — so it stays
+#             core-only, and the harness keeps proving the compiled Agent config
 #             runs on a core build. Same pin, so nothing else differs.
 #
 # Two more things here are hand-written, deliberately:
@@ -77,6 +86,25 @@ services:
       - --config=/etc/otelcol/insecure.yaml
     volumes:
       - ./generated/agent.yaml:/etc/otelcol/compiled.yaml:ro
+      - ./insecure/agent.yaml:/etc/otelcol/insecure.yaml:ro
+    networks:
+      - otel
+
+  # A SECOND Agent, for a service whose live telemetry does not meet the Standard
+  # catalog. Its config is compiled from harness/drifted-contract.yaml, which
+  # declares one resource attribute where S1 requires three — so what it forwards
+  # to the Gateway is a genuinely non-compliant stream, produced by a compiled
+  # Agent rather than hand-crafted.
+  #
+  # It is an Agent and not a shortcut to the Gateway on purpose: the Pipeline
+  # Guardrail has to catch telemetry arriving the way telemetry actually arrives.
+  agent-drifted:
+    image: otel/opentelemetry-collector:0.127.0
+    command:
+      - --config=/etc/otelcol/compiled.yaml
+      - --config=/etc/otelcol/insecure.yaml
+    volumes:
+      - ./generated/agent-drifted.yaml:/etc/otelcol/compiled.yaml:ro
       - ./insecure/agent.yaml:/etc/otelcol/insecure.yaml:ro
     networks:
       - otel
@@ -140,6 +168,29 @@ services:
       - --request
       - POST
       - http://agent:4318/v1/traces
+      - --header
+      - "Content-Type: application/json"
+      - --data-binary
+      - "@/payload.json"
+    networks:
+      - otel
+
+  # The same sample service, emitting to the drifted Agent instead. Same payload,
+  # same hop, different compiled Agent config — so the only thing that differs
+  # about what reaches the Gateway is which Telemetry Contract stamped it.
+  sample-service-drifted:
+    image: curlimages/curl:8.11.1
+    profiles: [emit]
+    depends_on: [agent-drifted]
+    volumes:
+      - ./generated/span.json:/payload.json:ro
+    command:
+      - --silent
+      - --show-error
+      - --fail
+      - --request
+      - POST
+      - http://agent-drifted:4318/v1/traces
       - --header
       - "Content-Type: application/json"
       - --data-binary

@@ -13,7 +13,7 @@ Telemetry takes two hops on this platform, and a service is only aware of the fi
 
 **Agent** — a lightweight collector running next to one service. It receives that service's OTLP, stamps the resource attributes its **Telemetry Contract** declares, batches, and forwards to the Gateway under a memory ceiling. It does no enforcement, and it names no Backend.
 
-**Gateway** — the central collector tier. Every Agent in the fleet forwards here. It rebatches across all of them and **fans out to every Backend**. It is also where **Pipeline Guardrails** will run and where back-pressure is handled, per Backend (ADR 0010).
+**Gateway** — the central collector tier. Every Agent in the fleet forwards here. It rebatches across all of them and **fans out to every Backend**. It is also where **Pipeline Guardrails** run — the Standards the catalog marks `enforced_at: [pipeline]`, checked against live telemetry — and where back-pressure is handled, per Backend (ADR 0010).
 
 **Backend** — a destination system where telemetry lands: an APM, a metrics store, a cold archive. Only the Gateway names one, and it names it by the **role** it fills rather than the product filling it — `primary-apm`, not a vendor. Services are Backend-agnostic (ADR 0007), and so is this repository: a vendor name here would end up in every compiled Gateway config, in git history, and in the exporter IDs the platform's own metrics are labelled by, so a migration would become a rename across all of it instead of one edit to one file.
 
@@ -26,6 +26,7 @@ The reason a service never names a Backend is ADR 0007: if each service targeted
 | What a service emits | its **Telemetry Contract** | one per service | `otel-guardrail compile` |
 | How a tier ships it | `controlplane/profiles.yaml` — the **Pipeline Profiles** | one per Service Tier | `otel-guardrail compile` |
 | The Gateway | `controlplane/gateway.yaml` — the **Gateway Declaration** | exactly one | `otel-guardrail gateway` |
+| What the org requires | `guardrail/standards.yaml` — the **Standard catalog** | exactly one | `otel-guardrail gateway`, for the Standards enforced at the pipeline |
 
 The Gateway's shape is *not* in a Pipeline Profile, and that is the load-bearing decision here (ADR 0013). A Profile is per Service Tier; the Gateway is one shared piece of infrastructure that no tier selects. Three tier Profiles each naming a Gateway shape would describe three Gateways where the org runs one, and merging them would leave the Gateway's shape with no owner.
 
@@ -127,6 +128,50 @@ processors:
     memory_limiter:
         check_interval: 1s
         limit_mib: 1024
+    transform/guardrail:
+        error_mode: ignore
+        log_statements:
+            - context: resource
+              statements:
+                - delete_matching_keys(attributes, "^otel\\.guardrail\\.")
+                - set(attributes["otel.guardrail.violation.S1"], "block") where attributes["service.name"] == nil or attributes["service.version"] == nil or attributes["deployment.environment"] == nil
+                - set(attributes["otel.guardrail.blocking"], true) where attributes["service.name"] == nil or attributes["service.version"] == nil or attributes["deployment.environment"] == nil
+                - set(attributes["otel.guardrail.violation.S3"], "warn") where attributes["service.namespace"] == nil or attributes["service.instance.id"] == nil
+            - context: scope
+              statements:
+                - delete_matching_keys(attributes, "^otel\\.guardrail\\.")
+            - context: log
+              statements:
+                - delete_matching_keys(attributes, "^otel\\.guardrail\\.")
+        metric_statements:
+            - context: resource
+              statements:
+                - delete_matching_keys(attributes, "^otel\\.guardrail\\.")
+                - set(attributes["otel.guardrail.violation.S1"], "block") where attributes["service.name"] == nil or attributes["service.version"] == nil or attributes["deployment.environment"] == nil
+                - set(attributes["otel.guardrail.blocking"], true) where attributes["service.name"] == nil or attributes["service.version"] == nil or attributes["deployment.environment"] == nil
+                - set(attributes["otel.guardrail.violation.S3"], "warn") where attributes["service.namespace"] == nil or attributes["service.instance.id"] == nil
+            - context: scope
+              statements:
+                - delete_matching_keys(attributes, "^otel\\.guardrail\\.")
+            - context: datapoint
+              statements:
+                - delete_matching_keys(attributes, "^otel\\.guardrail\\.")
+        trace_statements:
+            - context: resource
+              statements:
+                - delete_matching_keys(attributes, "^otel\\.guardrail\\.")
+                - set(attributes["otel.guardrail.violation.S1"], "block") where attributes["service.name"] == nil or attributes["service.version"] == nil or attributes["deployment.environment"] == nil
+                - set(attributes["otel.guardrail.blocking"], true) where attributes["service.name"] == nil or attributes["service.version"] == nil or attributes["deployment.environment"] == nil
+                - set(attributes["otel.guardrail.violation.S3"], "warn") where attributes["service.namespace"] == nil or attributes["service.instance.id"] == nil
+            - context: scope
+              statements:
+                - delete_matching_keys(attributes, "^otel\\.guardrail\\.")
+            - context: span
+              statements:
+                - delete_matching_keys(attributes, "^otel\\.guardrail\\.")
+            - context: spanevent
+              statements:
+                - delete_matching_keys(attributes, "^otel\\.guardrail\\.")
 exporters:
     otlp/cold-archive:
         endpoint: archive-otlp.observability.svc.cluster.local:4317
@@ -168,6 +213,7 @@ service:
                 - otlp
             processors:
                 - memory_limiter
+                - transform/guardrail
                 - batch
             exporters:
                 - otlp/primary-apm
@@ -177,6 +223,7 @@ service:
                 - otlp
             processors:
                 - memory_limiter
+                - transform/guardrail
                 - batch
             exporters:
                 - otlp/primary-apm
@@ -186,6 +233,7 @@ service:
                 - otlp
             processors:
                 - memory_limiter
+                - transform/guardrail
                 - batch
             exporters:
                 - otlp/primary-apm
@@ -201,6 +249,7 @@ Note what differs from an Agent's config, and why:
 
 - **Every Signal, always.** An Agent's pipelines are the Signals *one* Contract declares. The Gateway is shared, so it must relay anything any Contract could declare. Which *Backends* each of those pipelines exports to is per Signal, though.
 - **No `resource` processor.** Resource attributes are the Contract's, stamped at the Agent. The Gateway restamping them would mean two places could decide what a service is called.
+- **`transform/guardrail`.** The **Pipeline Guardrails**, compiled from `guardrail/standards.yaml` — the same catalog `otel-guardrail check` enforces before deploy. It runs here and in no Agent: Agents do no enforcement (ADR 0007), and this is the only place that sees the whole fleet. It sits upstream of the fan-out, so a record is judged once rather than once per Backend. See [pipeline-guardrails.md](./pipeline-guardrails.md).
 - **`delivery` is per Backend**, not per Gateway. One slow or unreachable Backend must not block exports to the others (ADR 0010).
 - **`extensions`.** The spill storage, one instance per spilling Backend. An Agent's config has none, and the field is omitted entirely rather than emitted empty.
 
@@ -217,6 +266,7 @@ Note what differs from an Agent's config, and why:
 | A Backend asks to `spill` with no `queue_size` | Spill is where the sending queue is kept. With no queue there is nothing to keep, and the volume would be mounted for nothing. |
 | The address is not `host:port` | The receiver is derived from its port; the fleet finds out, not the editor. |
 | A Backend has no name or no endpoint | An exporter that is unnameable or unreachable. |
+| A Standard declares `enforced_at: [pipeline]` and cannot be expressed as processors | The Gateway would read as enforcing a Standard it is not enforcing. Exit 2 — a broken catalog is the platform team's problem, not a finding about the Declaration. |
 
 ## Running the harness
 
@@ -224,7 +274,7 @@ Note what differs from an Agent's config, and why:
 bash harness/run.sh          # add --keep to leave it running
 ```
 
-Needs Docker, `docker compose`, and Go. Takes about two minutes. It stands up an Agent, a Gateway, **three Backend stand-ins** and a sample service, and asserts telemetry crosses every hop — with one of the three Backends deliberately unreachable throughout.
+Needs Docker, `docker compose`, and Go. Takes about two minutes. It stands up **two Agents**, a Gateway, **three Backend stand-ins** and a sample service, and asserts telemetry crosses every hop — with one of the three Backends deliberately unreachable throughout.
 
 **Both collector configs are compiled by the binary under test**, into `harness/generated/`, and mounted verbatim. A harness proving a hand-written config works would prove nothing about the compiler.
 
@@ -239,8 +289,9 @@ It asserts, in order:
 3. **Arrival by trace ID at the healthy Backend**, while the archive is down.
 4. **The Contract's `service.name`, not the sample service's.** The sample service sends `service.name: harness-sample-service`; what reaches the Backend says `checkout-api`, which is what `guardrail/examples/compliant-contract.yaml` declares. Only the compiled Agent config could have made that substitution, so it ran — this is *declared equals deployed* (ADR 0005) observed rather than asserted.
 5. **Fan-out per Signal, both directions.** The span does *not* reach the metrics-only Backend, which is running and would have printed it. A metric emitted next *does* reach it — and also reaches the primary APM, which takes every Signal.
-6. **The archive had no container at all** while 3–5 ran, so those assertions really were made against a Gateway holding a down Backend.
-7. **The archive's own queue drains when it comes up.** A span emitted while the archive had no container reaches it once it is started, which it cannot have had before: the Gateway held that span in *that Backend's* queue while serving the other two normally.
+6. **The Pipeline Guardrail tags a non-compliant stream, and drops nothing.** Nothing the compliant Agent sent carries an `otel.guardrail` attribute — asserted first, while no non-compliant telemetry exists. A **second Agent**, compiled from `harness/drifted-contract.yaml` (which declares one of the three resource attributes S1 requires), then emits a span. It **arrives** at the Backend by trace ID, carrying `otel.guardrail.violation.S1=block`, `otel.guardrail.violation.S3=warn` and `otel.guardrail.blocking=true`. Neither Agent's compiled config mentions any of that, so the Gateway is the only thing that could have written it.
+7. **The archive had no container at all** while 3–6 ran, so those assertions really were made against a Gateway holding a down Backend.
+8. **The archive's own queue drains when it comes up.** A span emitted while the archive had no container reaches it once it is started, which it cannot have had before: the Gateway held that span in *that Backend's* queue while serving the other two normally.
 
 ## What the harness proves, and what it does not
 
@@ -252,6 +303,7 @@ It asserts, in order:
 - The compiled Agent's `resource` processor stamps the Contract's attributes over whatever the service sent.
 - **Fan-out is per Signal**, observed on running Backends in both directions.
 - **One Backend being unreachable does not stop the others receiving**, and what that Backend missed was held in its own queue rather than dropped — for as long as its own `retry_on_failure` budget allows, which is the collector's 300s default since no Backend declares otherwise.
+- **The Pipeline Guardrails run, tag the right records, and leave the rest alone** — observed on a real contrib collector, on a stream produced by a compiled Agent rather than hand-crafted. Including that a `block` Standard does **not** drop: the non-compliant span arrives.
 
 **Does not prove:**
 
@@ -262,13 +314,16 @@ It asserts, in order:
 - **That spill survives a Gateway restart.** The extensions load, start, and each open their own directory; persistent queues are initialised per Backend per Signal. But the harness never restarts the Gateway, and it mounts `spill_root` as **tmpfs** — so the one property spill exists for is the one property this cannot show.
 - **That it runs anywhere but a developer's machine.** GitHub Actions is disabled on this repository, so this has never run in CI.
 
-Those gaps are recorded in full, with what it would take to close each, in **#38** (the C3 harness) and **#41** (this fan-out specifically).
+- **That the Pipeline Guardrails hold under load, or that a real Backend makes their tags usable.** One span through the non-compliant Agent proves the mechanism, not its cost — an OTTL condition evaluated on every record of the whole fleet is a per-record price nothing here measures. And the Backend stand-ins print what arrived; whether a real APM indexes `otel.guardrail.violation.S1` in a way an operator can alert on is untested. Recorded in **#45**.
+
+Those gaps are recorded in full, with what it would take to close each, in **#38** (the C3 harness), **#41** (this fan-out specifically) and **#45** (the Pipeline Guardrails).
 
 ## Reading the compiled configs by hand
 
 ```
 bash harness/run.sh --keep
 cat harness/generated/agent.yaml
+cat harness/generated/agent-drifted.yaml
 cat harness/generated/gateway.yaml
 docker compose --project-directory harness -f harness/docker-compose.yaml logs backend
 docker compose --project-directory harness -f harness/docker-compose.yaml logs backend-metrics

@@ -1,0 +1,63 @@
+{
+  "_comment": [
+    "A span from a service that writes the Gateway's own verdict attributes itself.",
+    "",
+    "Nothing prevents this: an Agent stamps the resource attributes its Telemetry",
+    "Contract declares and forwards everything else untouched, so whatever a service",
+    "puts in the otel.guardrail. namespace arrives at the Gateway intact. If the",
+    "Pipeline Guardrail only ever set those attributes on violation, this span would",
+    "reach the Backend claiming otel.guardrail.blocking=false — and that is the one",
+    "field an operator alerts on, so a service could opt out of enforcement by",
+    "asserting compliance.",
+    "",
+    "It is forged at BOTH levels on purpose. Clearing only the resource would leave",
+    "the span-level copy, and most Backends flatten record and resource attributes",
+    "into one queryable field, so the forgery would still answer the query.",
+    "",
+    "The harness posts this through the COMPLIANT Agent, whose telemetry violates",
+    "nothing, and then asserts no otel.guardrail attribute reaches the Backend at",
+    "all. See ADR 0015."
+  ],
+  "resourceSpans": [
+    {
+      "resource": {
+        "attributes": [
+          {
+            "key": "service.name",
+            "value": { "stringValue": "harness-sample-service" }
+          },
+          {
+            "key": "otel.guardrail.blocking",
+            "value": { "boolValue": false }
+          },
+          {
+            "key": "otel.guardrail.violation.S1",
+            "value": { "stringValue": "info" }
+          }
+        ]
+      },
+      "scopeSpans": [
+        {
+          "scope": { "name": "otel-platform-harness" },
+          "spans": [
+            {
+              "traceId": "__TRACE_ID__",
+              "spanId": "__SPAN_ID__",
+              "name": "__SPAN_NAME__",
+              "kind": 2,
+              "startTimeUnixNano": "__START_NANOS__",
+              "endTimeUnixNano": "__END_NANOS__",
+              "attributes": [
+                {
+                  "key": "otel.guardrail.blocking",
+                  "value": { "boolValue": false }
+                }
+              ],
+              "status": {}
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -107,6 +108,22 @@ func parseEnforcementSchedule(data []byte, origin string) (*EnforcementSchedule,
 // first appeared on or after it is new, one appearing before it is legacy.
 func (s *EnforcementSchedule) Epoch() Date {
 	return s.epoch
+}
+
+// GraduatingStandards is every Standard the schedule publishes a deadline for,
+// in a stable order. It exists so the schedule can be checked against the
+// Standard catalog: a deadline for a Standard nobody declares defers nothing,
+// and reads as filed.
+func (s *EnforcementSchedule) GraduatingStandards() []string {
+	if s == nil {
+		return nil
+	}
+	standards := make([]string, 0, len(s.graduations))
+	for standard := range s.graduations {
+		standards = append(standards, standard)
+	}
+	sort.Strings(standards)
+	return standards
 }
 
 // ServiceAge is which side of the Enforcement Epoch a service's Telemetry

@@ -1,0 +1,29 @@
+# A Telemetry Contract whose LIVE TELEMETRY violates the Standard catalog.
+#
+# It lives here rather than in guardrail/examples/ because it is not an example
+# of anything a service should write — `otel-guardrail check` exits 1 on it. That
+# is the point. It compiles (tier-3 mandates traces, and it declares traces), so
+# an Agent built from it runs, stamps the one resource attribute it names, and
+# forwards telemetry that is missing two attributes S1 requires and both S3
+# recommends.
+#
+# It is how the harness gets a NON-COMPLIANT STREAM to point at the Gateway. That
+# stream stands in for the two ways reality drifts from a declaration in practice:
+# a service deployed before its Standards graduated, and telemetry that never went
+# through Preflight at all. Layer 1 would have stopped this one at the build;
+# Layer 2 is what sees it when Layer 1 did not run.
+#
+# tier-1, so its Agent uses the tier-1 Profile's 5s batch timeout and the harness
+# does not wait half a minute for a span — and because a tier-1 service drifting
+# is the case worth watching, not a batch job.
+apiVersion: guardrail.otel/v1
+kind: TelemetryContract
+service_name: drifted-checkout-worker
+owner: team-legacy
+tier: tier-1
+signals:
+  - traces
+  - metrics
+  - logs
+resource_attributes:
+  service.name: drifted-checkout-worker

@@ -28,9 +28,17 @@
 #      have made that substitution, so it ran.
 #   5. FAN-OUT PER SIGNAL. The span does NOT reach the metrics-only Backend, while
 #      a metric emitted next does. Both directions, on a running Backend.
-#   6. The unreachable Backend had no container at all while 3-5 ran, so those
+#   6. PIPELINE GUARDRAIL. A span that writes the verdict attributes ITSELF, sent
+#      through the compliant Agent, arrives with none of them — so the namespace is
+#      the Gateway's, and the assertion that compliant telemetry is untagged is not
+#      vacuous. A SECOND Agent, compiled from a Contract declaring one of the three
+#      resource attributes S1 requires, then emits a span, and it arrives TAGGED
+#      and NOT DROPPED: violation.S1=block, violation.S3=warn, blocking=true —
+#      values, not just keys, because the Severity mapping is the decision. Neither
+#      Agent's compiled config mentions any of it, so only the Gateway wrote it.
+#   7. The unreachable Backend had no container at all while 3-6 ran, so those
 #      assertions really were made against a Gateway holding a down Backend.
-#   7. A span emitted while the archive had no container reaches it once it is
+#   8. A span emitted while the archive had no container reaches it once it is
 #      started — which it cannot have had before. The Gateway held that span in the
 #      ARCHIVE's OWN queue while serving the other two normally, which is
 #      per-Backend isolation observed rather than asserted.
@@ -105,6 +113,53 @@ emit() {
 	fi
 }
 
+# emit_forged posts a span that writes the Gateway's own verdict attributes itself,
+# at both the resource and the span level, through the COMPLIANT Agent. Its
+# telemetry violates nothing, so if any otel.guardrail attribute reaches the
+# Backend it came from the service and the Gateway failed to scrub it.
+emit_forged() {
+	local trace_id="$1"
+	local span_name="$2"
+	local start
+	start="$(now_nanos)"
+
+	sed -e "s/__TRACE_ID__/$trace_id/" \
+		-e "s/__SPAN_ID__/$(hexrand 8)/" \
+		-e "s/__SPAN_NAME__/$span_name/" \
+		-e "s/__START_NANOS__/$start/" \
+		-e "s/__END_NANOS__/$((start + 1000000))/" \
+		"$here/forged-span.json.template" >"$generated/span.json"
+
+	if ! compose run --rm sample-service >"$generated/emit.log" 2>&1; then
+		echo "the sample service could not POST the forged OTLP to its Agent:"
+		sed 's/^/    /' "$generated/emit.log"
+		exit 2
+	fi
+}
+
+# emit_drifted posts the span payload to the SECOND Agent — the one compiled from
+# a Telemetry Contract that declares one resource attribute where S1 requires
+# three. Same payload, same hop, different compiled config.
+emit_drifted() {
+	local trace_id="$1"
+	local span_name="$2"
+	local start
+	start="$(now_nanos)"
+
+	sed -e "s/__TRACE_ID__/$trace_id/" \
+		-e "s/__SPAN_ID__/$(hexrand 8)/" \
+		-e "s/__SPAN_NAME__/$span_name/" \
+		-e "s/__START_NANOS__/$start/" \
+		-e "s/__END_NANOS__/$((start + 1000000))/" \
+		"$here/span.json.template" >"$generated/span.json"
+
+	if ! compose run --rm sample-service-drifted >"$generated/emit.log" 2>&1; then
+		echo "the sample service could not POST OTLP to the drifted Agent:"
+		sed 's/^/    /' "$generated/emit.log"
+		exit 2
+	fi
+}
+
 # emit_metric posts one metric to the Agent, from the same service, over the same
 # hop. The metrics pipeline fans out to a different set of Backends from the traces
 # pipeline, which is the thing it exists to show.
@@ -126,13 +181,17 @@ emit_metric() {
 }
 
 # arrived polls one Backend's log for a string, up to a deadline.
+#
+# -F here and below: every needle is a literal — a trace ID, an attribute name, a
+# component ID — and an unanchored `.` in `otel.guardrail` would happily match the
+# hyphen in `otel-guardrail`, which is a different thing entirely.
 arrived() {
 	local backend="$1"
 	local needle="$2"
 	local seconds="$3"
 	local deadline=$((SECONDS + seconds))
 	while [ "$SECONDS" -lt "$deadline" ]; do
-		if compose logs "$backend" 2>&1 | grep -q -- "$needle"; then return 0; fi
+		if compose logs "$backend" 2>&1 | grep -qF -- "$needle"; then return 0; fi
 		sleep 2
 	done
 	return 1
@@ -145,7 +204,7 @@ logged() {
 	local seconds="$3"
 	local deadline=$((SECONDS + seconds))
 	while [ "$SECONDS" -lt "$deadline" ]; do
-		if compose logs "$service" 2>&1 | grep -q -- "$needle"; then return 0; fi
+		if compose logs "$service" 2>&1 | grep -qF -- "$needle"; then return 0; fi
 		sleep 2
 	done
 	return 1
@@ -155,7 +214,7 @@ ready() {
 	local service="$1"
 	local deadline=$((SECONDS + 60))
 	while [ "$SECONDS" -lt "$deadline" ]; do
-		if compose logs "$service" 2>&1 | grep -q "Everything is ready"; then return 0; fi
+		if compose logs "$service" 2>&1 | grep -qF "Everything is ready"; then return 0; fi
 		sleep 1
 	done
 	return 1
@@ -194,6 +253,25 @@ if [ "$backend_count" -lt 2 ]; then
 	exit 2
 fi
 ok "the Gateway fans out to $backend_count Backends, each with its own exporter"
+
+# The second Agent's config: a Telemetry Contract that declares one resource
+# attribute where S1 requires three. Compiled by the same binary, from a Contract
+# `otel-guardrail check` would have blocked — which is exactly the stream a
+# Pipeline Guardrail exists to catch when Preflight did not run.
+if ! (cd "$repo_root" && "$guardrail" compile harness/drifted-contract.yaml) >"$generated/agent-drifted.yaml"; then
+	echo "could not compile the drifted Agent config"
+	exit 2
+fi
+ok "a second Agent config compiled from harness/drifted-contract.yaml"
+
+# Read out of the compiled Gateway rather than listed here: a catalog that stops
+# enforcing anything at the pipeline must not leave these assertions passing
+# against a Gateway that checks nothing.
+if ! grep -q '^    transform/guardrail:' "$generated/gateway.yaml"; then
+	echo "the compiled Gateway runs no Pipeline Guardrail; there is nothing here to test"
+	exit 2
+fi
+ok "the Gateway runs the Pipeline Guardrails compiled from the Standard catalog"
 
 contract_service_name="$(grep -A1 'key: service.name' "$generated/agent.yaml" | grep 'value:' | head -1 | sed 's/.*value: //')"
 if [ -z "$contract_service_name" ]; then
@@ -320,6 +398,99 @@ if arrived backend "$metric" 30; then
 	ok "the same metric also arrived at the primary APM, which takes every Signal — one Signal, two Backends"
 else
 	bad "the metric did not reach the primary APM, which declares no Signal subset"
+fi
+
+# --------------------------------------------------- Pipeline Guardrail ----
+
+say "Pipeline Guardrail: compliant telemetry is not touched, and cannot forge a verdict"
+
+# This whole section has to come BEFORE any non-compliant telemetry exists:
+# afterwards the Backend's log carries real Guardrail attributes and the assertion
+# below would pass or fail for the wrong reason.
+#
+# A span that writes the verdict attributes ITSELF, at both the resource and the
+# span level, through the compliant Agent. Without it the assertion below would be
+# vacuous — nothing would ever have tried, so "no otel.guardrail in the log" would
+# hold even if the Gateway's clearing statements were deleted.
+forged_trace="$(hexrand 16)"
+emit_forged "$forged_trace" "harness-forged-verdict"
+ok "a service claiming otel.guardrail.blocking=false emitted a span through the compliant Agent"
+
+if arrived backend "$forged_trace" 120; then
+	ok "the forged span arrived at the Backend (trace ID $forged_trace) — so what it carries can be judged"
+else
+	bad "the forged span never reached the Backend, so nothing below is being asserted about it"
+	compose logs gateway 2>&1 | tail -20
+fi
+
+# Everything before this went through the Agent compiled from a Contract that
+# declares every attribute S1 requires and S3 recommends — so it violates nothing
+# and must carry no verdict; and the forged span's own claims must have been
+# scrubbed. One assertion covers both, and it is the load-bearing one for the
+# namespace being the Gateway's (ADR 0015).
+if arrived backend "otel.guardrail" 5; then
+	bad "an otel.guardrail attribute reached the Backend from compliant telemetry — either the Guardrail tags everything, or a service's forged verdict survived"
+	compose logs backend 2>&1 | grep -F "otel.guardrail" | head -5
+else
+	ok "no otel.guardrail attribute survived: compliant telemetry is untagged and the forged one was scrubbed"
+fi
+
+say "Pipeline Guardrail: a non-compliant stream is tagged, and still arrives"
+
+if ! compose up -d agent-drifted >/dev/null 2>&1; then
+	echo "could not start the drifted Agent"
+	exit 2
+fi
+ready agent-drifted || {
+	echo "the drifted Agent never became ready"
+	exit 2
+}
+
+drift_trace="$(hexrand 16)"
+emit_drifted "$drift_trace" "harness-drifted-stream"
+ok "a service whose Contract declares one of S1's three required attributes emitted a span"
+
+# THE LOAD-BEARING ASSERTION OF ADR 0015. A Standard whose Severity is `block`
+# does not delete telemetry at run time — `block` fails a BUILD, and the runtime
+# analogue of stopping a deploy is not destroying the observation. If this ever
+# starts failing because the span is gone, the Severity mapping has been changed
+# into the one that ADR rejects.
+if arrived backend "$drift_trace" 120; then
+	ok "the non-compliant span arrived at the Backend (trace ID $drift_trace) — a block Standard tags, it does not drop"
+else
+	bad "the non-compliant span never reached the Backend; a Pipeline Guardrail must not delete telemetry"
+	compose logs gateway 2>&1 | tail -20
+fi
+
+# What an operator reads. One key per violated Standard, VALUED AT THAT STANDARD'S
+# SEVERITY, plus the one low-cardinality roll-up to alert on.
+#
+# The values are asserted, not just the keys: the Severity mapping is the decision
+# ADR 0015 turns on, and a Guardrail that tagged every violation `block` would look
+# identical here if only the key were checked. The forms are the debug exporter's —
+# `Str(...)` for a string attribute, `Bool(...)` for a boolean.
+for tag in \
+	"otel.guardrail.violation.S1: Str(block)" \
+	"otel.guardrail.violation.S3: Str(warn)" \
+	"otel.guardrail.blocking: Bool(true)"; do
+	if arrived backend "$tag" 60; then
+		ok "the Gateway tagged it $tag — the Standard is named on the record, at its own Severity"
+	else
+		bad "the Gateway did not tag the non-compliant span with $tag"
+		compose logs backend 2>&1 | grep -F "otel.guardrail" | head -5
+		compose logs gateway 2>&1 | tail -20
+	fi
+done
+
+# The Agent is a core collector and stamps only what its Contract declares; the
+# transform that wrote those attributes exists in the GATEWAY's compiled config
+# and in no Agent's. Enforcement is centralised (ADR 0007, #14).
+# -F, because every compiled config carries the string `otel-guardrail` in its
+# generated-by header and an unanchored `.` would match the hyphen.
+if grep -qF "otel.guardrail" "$generated/agent-drifted.yaml" || grep -qF "otel.guardrail" "$generated/agent.yaml"; then
+	bad "an Agent's compiled config mentions the Guardrail attributes; enforcement must be centralised in the Gateway"
+else
+	ok "no Agent config mentions a Guardrail — the tags can only have come from the Gateway"
 fi
 
 # ---------------------------------------------------- the down Backend ----
