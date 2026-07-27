@@ -3,6 +3,8 @@ package controlplane
 import (
 	"fmt"
 	"net"
+	"path"
+	"regexp"
 	"slices"
 	"sort"
 	"strconv"
@@ -105,6 +107,17 @@ func CompileGateway(declaration *GatewayDeclaration, profiles *ProfileSet) (Coll
 			return CollectorConfig{}, fmt.Errorf(
 				"cannot compile the Gateway: Backend %q names no endpoint, so the Gateway would have nowhere to export to", backend.Name)
 		}
+		// The name is not a label. It becomes a collector component ID and a path
+		// segment under spill_root, and both of those normalise — a component ID is
+		// trimmed, a path is cleaned. So two names that differ to the duplicate check
+		// below can still collapse into one exporter or one spill directory, which
+		// would make ADR 0014's "unrepresentable" merely "unlikely": `./a` and `a`
+		// clean to the same directory, `../x` escapes spill_root altogether, and
+		// " primary-apm" is a distinct string here that the collector trims into an
+		// existing exporter there.
+		if err := validBackendName(backend.Name); err != nil {
+			return CollectorConfig{}, fmt.Errorf("cannot compile the Gateway: %w", err)
+		}
 		// A Backend's name is its identity in the compiled config — its exporter is
 		// otlp/<name>, its spill lives under <name> — so two of them sharing a name
 		// collapse into one component, and the map that swallowed the first shows no
@@ -114,13 +127,16 @@ func CompileGateway(declaration *GatewayDeclaration, profiles *ProfileSet) (Coll
 				"cannot compile the Gateway: Backend %q is declared twice, and the second would silently replace the first", backend.Name)
 		}
 		declaredOnce[backend.Name] = true
-		// Spill needs somewhere to spill to. Without a root, the storage directory
-		// would be relative to wherever the Gateway process was started — inside the
-		// container image, on no mounted volume, gone on the next restart. A queue
-		// that reads as persistent in every review and is not.
-		if backend.Delivery.Spill && declaration.SpillRoot == "" {
+		// Spill needs somewhere to spill to, and that somewhere is an absolute path.
+		// A root that is empty OR relative both resolve against wherever the Gateway
+		// process happened to be started — inside the container image, on no mounted
+		// volume, gone on the next restart — so refusing only the empty string would
+		// leave the same failure reachable by a shorter route. A spill volume is
+		// mounted at an absolute path or it is not mounted.
+		if backend.Delivery.Spill && !path.IsAbs(declaration.SpillRoot) {
 			return CollectorConfig{}, fmt.Errorf(
-				"cannot compile the Gateway: Backend %q asks to spill but the Gateway declares no `spill_root:`, so its queue would be written somewhere unmounted and lost on restart", backend.Name)
+				"cannot compile the Gateway: Backend %q asks to spill but the Gateway's `spill_root:` is %q, which is not an absolute path — its queue would be written relative to the Gateway's working directory, on no mounted volume, and lost on restart",
+				backend.Name, declaration.SpillRoot)
 		}
 		// Spill is where the sending queue is kept, not a mechanism beside it. With no
 		// queue there is nothing to keep, and the compiled config would carry a storage
@@ -128,6 +144,15 @@ func CompileGateway(declaration *GatewayDeclaration, profiles *ProfileSet) (Coll
 		if backend.Delivery.Spill && backend.Delivery.QueueSize == 0 {
 			return CollectorConfig{}, fmt.Errorf(
 				"cannot compile the Gateway: Backend %q asks to spill but declares no `queue_size:`, and spill is where the sending queue is kept — with no queue there is nothing to spill", backend.Name)
+		}
+		// Omitting `signals:` means every Signal. Writing `signals: []` is somebody
+		// saying something, and the only thing it can mean is "none" — a Backend that
+		// does nothing. Letting both fall through one length check would read the
+		// second as its exact opposite, which is the widest gap there is between what
+		// was written and what runs.
+		if backend.Signals != nil && len(backend.Signals) == 0 {
+			return CollectorConfig{}, fmt.Errorf(
+				"cannot compile the Gateway: Backend %q declares an empty `signals: []`, so it would receive nothing — remove the line to give it every Signal, or list the ones it takes", backend.Name)
 		}
 		// A Signal typo matches no pipeline, so the Backend simply receives nothing
 		// while every export elsewhere still succeeds. The same reason Compile rejects
@@ -162,6 +187,22 @@ func signalsNoBackendReceives(backends []Backend) []string {
 		}
 	}
 	return orphaned
+}
+
+// backendName is what a Backend may be called: lower-case alphanumerics and
+// hyphens, starting and ending with an alphanumeric. Deliberately narrower than
+// either a collector component ID or a directory name, because the name has to be
+// safely both — and because it is a role the org names once (`primary-apm`,
+// `cold-archive`), not a free-text field.
+var backendName = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`)
+
+func validBackendName(name string) error {
+	if !backendName.MatchString(name) {
+		return fmt.Errorf(
+			"Backend name %q is not a role name — it becomes both a collector component ID and a directory under `spill_root:`, so it must be lower-case letters, digits and hyphens, starting and ending with a letter or digit (like `primary-apm`)",
+			name)
+	}
+	return nil
 }
 
 // validAddress checks the Gateway's address is a host and port an Agent could

@@ -264,6 +264,35 @@ gateway:
 	}
 }
 
+func TestABackendThatWritesAnEmptySignalListDoesNotCompile(t *testing.T) {
+	// Omitting `signals:` means every Signal. Writing `signals: []` is somebody
+	// saying something, and the only thing it can mean is "none" — which is a
+	// Backend that does nothing. Reading it as "everything" is the widest possible
+	// distance between what was written and what happens, so the two cases are kept
+	// apart rather than both falling through a length check.
+	_, err := controlplane.CompileGateway(gatewayFrom(t, `apiVersion: guardrail.otel/v1
+kind: GatewayDeclaration
+gateway:
+  address: otel-gateway.observability.svc.cluster.local:4317
+  batch:
+    timeout: 5s
+    send_batch_size: 8192
+  backends:
+    - backend: primary-apm
+      endpoint: apm-otlp.observability.svc.cluster.local:4317
+    - backend: cold-archive
+      endpoint: archive-otlp.observability.svc.cluster.local:4317
+      signals: []
+`), profiles(t))
+
+	if err == nil {
+		t.Fatal("a Backend with an empty signals list compiled — written as `none` and read as `every Signal`")
+	}
+	if !strings.Contains(err.Error(), "cold-archive") {
+		t.Errorf("the error does not name the Backend: %v", err)
+	}
+}
+
 func TestASignalNoBackendReceivesDoesNotCompile(t *testing.T) {
 	// Every Agent forwards every Signal it collects to the Gateway. A Signal with
 	// no Backend behind it is a pipeline that receives the fleet's telemetry and
@@ -317,6 +346,53 @@ gateway:
 	}
 	if !strings.Contains(err.Error(), "primary-apm") {
 		t.Errorf("the error does not name the Backend declared twice: %v", err)
+	}
+}
+
+func TestABackendNameThatIsNotASimpleIdentifierDoesNotCompile(t *testing.T) {
+	// The Backend's name is not just a label: it becomes a collector component ID
+	// and a path segment under spill_root. Both of those normalise, and the
+	// duplicate-name check compares raw strings — so without a charset, two names
+	// that differ here collapse there, and the claim that a shared storage instance
+	// is unrepresentable is simply false.
+	//
+	//   "./a" and "a"       two names, one directory: one bbolt file, one lock.
+	//   "../x"              escapes spill_root entirely, onto whatever is mounted
+	//                       above it.
+	//   " primary-apm"      distinct here, but the collector trims a component ID,
+	//                       so it collapses into another exporter there — the
+	//                       silent replacement the duplicate check exists to stop.
+	for name, backend := range map[string]string{
+		"a path segment":     "./a",
+		"a parent traversal": "../escapes",
+		"leading space":      " primary-apm",
+		"a slash":            "apm/primary",
+		"upper case":         "Primary-APM",
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := controlplane.CompileGateway(gatewayFrom(t, `apiVersion: guardrail.otel/v1
+kind: GatewayDeclaration
+gateway:
+  address: otel-gateway.observability.svc.cluster.local:4317
+  spill_root: /var/lib/otelcol/spill
+  batch:
+    timeout: 5s
+    send_batch_size: 8192
+  backends:
+    - backend: "`+backend+`"
+      endpoint: apm-otlp.observability.svc.cluster.local:4317
+      delivery:
+        queue_size: 20000
+        spill: true
+`), profiles(t))
+
+			if err == nil {
+				t.Fatalf("a Backend named %q compiled, so its exporter ID and its spill directory are whatever that normalises to", backend)
+			}
+			if !strings.Contains(strings.ToLower(err.Error()), "name") {
+				t.Errorf("the error does not say the name is the problem: %v", err)
+			}
+		})
 	}
 }
 
@@ -468,6 +544,40 @@ gateway:
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("the error does not mention %q, so a reader cannot see what to add: %v", want, err)
 		}
+	}
+}
+
+func TestASpillRootThatIsNotAnAbsolutePathDoesNotCompile(t *testing.T) {
+	// A relative root produces exactly the outcome the missing-root error describes
+	// — a directory resolved against wherever the Gateway process happened to be
+	// started, on no mounted volume — so refusing only the empty string would leave
+	// the failure reachable by a shorter route. A spill volume is mounted at an
+	// absolute path or it is not mounted.
+	for _, root := range []string{"spill", "./spill", "var/lib/otelcol/spill"} {
+		t.Run(root, func(t *testing.T) {
+			_, err := controlplane.CompileGateway(gatewayFrom(t, `apiVersion: guardrail.otel/v1
+kind: GatewayDeclaration
+gateway:
+  address: otel-gateway.observability.svc.cluster.local:4317
+  spill_root: `+root+`
+  batch:
+    timeout: 5s
+    send_batch_size: 8192
+  backends:
+    - backend: primary-apm
+      endpoint: apm-otlp.observability.svc.cluster.local:4317
+      delivery:
+        queue_size: 20000
+        spill: true
+`), profiles(t))
+
+			if err == nil {
+				t.Fatalf("a spill_root of %q compiled, so the queue is written relative to the process's working directory", root)
+			}
+			if !strings.Contains(err.Error(), "spill_root") {
+				t.Errorf("the error does not say the spill_root is the problem: %v", err)
+			}
+		})
 	}
 }
 
@@ -665,6 +775,64 @@ func TestACompiledConfigRunsExactlyTheExtensionsItDefines(t *testing.T) {
 			t.Error("a config validated while defining storage the collector never starts, so the queue it backs is not persistent")
 		} else if !strings.Contains(err.Error(), "primary-apm") {
 			t.Errorf("the error does not name the inert extension: %v", err)
+		}
+	})
+}
+
+func TestAQueueMaySpillOnlyToStorageTheCollectorRuns(t *testing.T) {
+	// The third reference in a spilling config, and the one Validate could not see:
+	// an exporter's `sending_queue.storage` names an extension. Two independent
+	// `if backend.Delivery.Spill` branches happen to keep it consistent today —
+	// nothing in the types ties them together, and a config where they disagree
+	// stops the collector at load while Validate calls it coherent.
+	spilling := func() controlplane.CollectorConfig {
+		return controlplane.CollectorConfig{
+			Receivers:  map[string]any{"otlp": map[string]any{}},
+			Processors: map[string]any{"batch": map[string]any{}},
+			Exporters: map[string]any{"otlp/primary-apm": map[string]any{
+				"sending_queue": map[string]any{"storage": "file_storage/primary-apm"},
+			}},
+			Extensions: map[string]any{"file_storage/primary-apm": map[string]any{}},
+			Service: controlplane.CollectorService{
+				Extensions: []string{"file_storage/primary-apm"},
+				Pipelines: map[string]controlplane.Pipeline{
+					"traces": {
+						Receivers:  []string{"otlp"},
+						Processors: []string{"batch"},
+						Exporters:  []string{"otlp/primary-apm"},
+					},
+				},
+			},
+		}
+	}
+
+	if err := spilling().Validate(); err != nil {
+		t.Fatalf("a coherent spilling config does not validate: %v", err)
+	}
+
+	t.Run("spilling to storage that does not exist", func(t *testing.T) {
+		config := spilling()
+		config.Exporters["otlp/primary-apm"].(map[string]any)["sending_queue"] = map[string]any{
+			"storage": "file_storage/cold-archive",
+		}
+
+		if err := config.Validate(); err == nil {
+			t.Error("a config validated while a queue spills to storage the config does not define; the collector would refuse it at load")
+		} else if !strings.Contains(err.Error(), "cold-archive") {
+			t.Errorf("the error does not name the storage that is missing: %v", err)
+		}
+	})
+
+	t.Run("spilling to storage the service block does not start", func(t *testing.T) {
+		config := spilling()
+		config.Extensions["file_storage/cold-archive"] = map[string]any{}
+		config.Service.Extensions = []string{"file_storage/cold-archive"}
+		config.Exporters["otlp/primary-apm"].(map[string]any)["sending_queue"] = map[string]any{
+			"storage": "file_storage/primary-apm",
+		}
+
+		if err := config.Validate(); err == nil {
+			t.Error("a config validated while a queue spills to an extension that is defined but never started")
 		}
 	})
 }

@@ -30,9 +30,9 @@
 #      a metric emitted next does. Both directions, on a running Backend.
 #   6. The unreachable Backend had no container at all while 3-5 ran, so those
 #      assertions really were made against a Gateway holding a down Backend.
-#   7. Once the archive is started it receives the span emitted minutes earlier —
-#      which it cannot have had before. The Gateway held that span in the ARCHIVE's
-#      OWN queue the whole time it was serving the other two normally, which is
+#   7. A span emitted while the archive had no container reaches it once it is
+#      started — which it cannot have had before. The Gateway held that span in the
+#      ARCHIVE's OWN queue while serving the other two normally, which is
 #      per-Backend isolation observed rather than asserted.
 #
 # Needs: docker, docker compose, go. Takes about two minutes.
@@ -252,11 +252,22 @@ ok "the Gateway started on its compiled config, with cold-archive unresolvable"
 # The spill extensions are the one thing in the compiled Gateway config that the
 # core distribution does not have (ADR 0014). If they did not start, everything
 # below would still pass while the durability the declaration asks for was absent.
-if logged gateway "file_storage/primary-apm" 20; then
-	ok "each spilling Backend's own file_storage extension started"
-else
-	bad "the Gateway logged no file_storage extension, so the spill the declaration asks for is not running"
+#
+# Every one of them is checked, read out of the compiled config rather than listed
+# here: a Gateway that started one extension and not the other must not report ok,
+# and this way adding a spilling Backend cannot leave the assertion behind.
+spilling="$(sed -n 's/^ *\(file_storage\/[a-z0-9-]*\):$/\1/p' "$generated/gateway.yaml")"
+if [ -z "$spilling" ]; then
+	echo "the compiled Gateway defines no file_storage extension; spill is what needs the contrib distribution, so there is nothing here to test"
+	exit 2
 fi
+for storage in $spilling; do
+	if logged gateway "$storage" 20; then
+		ok "$storage started — its Backend's own spill storage"
+	else
+		bad "the Gateway never started $storage, so that Backend's queue is not persistent"
+	fi
+done
 
 say "service -> Agent -> Gateway -> Backends"
 trace="$(hexrand 16)"
@@ -319,17 +330,41 @@ say "The unreachable Backend really was unreachable"
 # healthy all along and the isolation never having been tested. It is asserted
 # structurally rather than from the Gateway's log: a collector retrying a failed
 # export says nothing at default verbosity, so the log is silent either way.
-if [ -z "$(compose ps -aq backend-archive 2>/dev/null)" ]; then
+# `--profile recover` is named because compose subcommands do not agree about
+# profile-gated services — `down` skips them, which is why teardown names the
+# profiles too. Without it here, a `ps` that filtered the way `down` does would
+# report empty whether or not an archive were running, and the one check that gives
+# assertions 3-5 their meaning would pass vacuously.
+if [ -z "$(compose --profile recover ps -aq backend-archive 2>/dev/null)" ]; then
 	ok "cold-archive had no container at all while everything above ran — its endpoint did not even resolve"
 else
 	bad "a cold-archive container exists, so the Backend the fan-out was tested against was not actually down"
 fi
 
 # The strongest evidence that the isolation is real, and it is this rather than
-# anything in a log: the archive receives a span emitted minutes ago, which it
-# cannot have had before. The Gateway held that span in COLD-ARCHIVE's OWN queue
-# for the whole time it was serving the other two Backends normally.
+# anything in a log: the archive receives a span emitted while it did not exist,
+# which it cannot have had before. The Gateway held that span in COLD-ARCHIVE's OWN
+# queue while serving the other two Backends normally.
+#
+# A FRESH span, not the end-to-end one, and the reason is a deadline rather than a
+# preference. cold-archive compiles `retry_on_failure` with no max_elapsed_time, so
+# the collector's 300s default applies and a span queued for it is dropped for good
+# after five minutes. The end-to-end span is already several polling windows old by
+# now, and on a slow machine it could cross that line — which would fail here for a
+# reason that has nothing to do with per-Backend isolation. This one is emitted on
+# a known clock.
 say "Bringing the archive up: its own queue drains, on its own"
+
+recovery_trace="$(hexrand 16)"
+emit "$recovery_trace" "harness-archive-recovery"
+ok "emitted a span while the archive still had no container at all"
+
+# Long enough that the Gateway has certainly tried this Backend and failed: the
+# exporter dials on the next flush, DNS returns nothing, and the batch goes to
+# cold-archive's queue. Without the pause the archive could come up first, and
+# arrival below would prove ordinary delivery rather than a queue that held.
+sleep 15
+
 if ! compose --profile recover up -d backend-archive >/dev/null 2>&1; then
 	echo "could not start the archive Backend"
 	exit 2
@@ -339,8 +374,8 @@ ready backend-archive || {
 	exit 2
 }
 
-if arrived backend-archive "$trace" 120; then
-	ok "the span the archive missed arrived once it came up (trace ID $trace) — its queue held it, and its retry drained it"
+if arrived backend-archive "$recovery_trace" 120; then
+	ok "the span the archive missed arrived once it came up (trace ID $recovery_trace) — its own queue held it, and its own retry drained it"
 else
 	bad "the archive received nothing after coming up; its queue dropped what it was holding, or retry gave up"
 	compose logs gateway 2>&1 | tail -20

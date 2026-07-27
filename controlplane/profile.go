@@ -149,6 +149,15 @@ func parseProfileSet(data []byte, origin string) (*ProfileSet, error) {
 		if len(profile.Tiers) == 0 {
 			return nil, fmt.Errorf("Pipeline Profiles %s: Profile %q is selected by no Service Tier, so nothing would ever compile with it", origin, profile.Name)
 		}
+		// `delivery` is shared by a Profile and a Backend, but `spill` belongs to the
+		// Backend alone: it needs a storage extension from the collector's contrib
+		// distribution, and the Agent stays core-only (ADR 0014). Nothing compiles it
+		// into an Agent config — which is precisely why writing it here has to fail
+		// rather than be ignored. Silently dropping it would leave a Profile that
+		// reads as durable in every review while the fleet runs an in-memory queue.
+		if profile.Delivery.Spill {
+			return nil, fmt.Errorf("Pipeline Profiles %s: Profile %q asks its Agents to spill, but spill is a Backend's setting and nothing compiles it into an Agent — the Agent stays on the collector's core distribution (ADR 0014), so remove `spill:` here and set it on a Backend in the Gateway Declaration", origin, profile.Name)
+		}
 
 		set.order = append(set.order, profile.Name)
 		set.byName[profile.Name] = profile

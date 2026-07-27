@@ -355,6 +355,22 @@ func (cc CollectorConfig) Validate() error {
 		used["extension/"+name] = true
 	}
 
+	// The third reference a spilling config makes, and the only one not visible from
+	// the service block: an exporter's queue names the storage it spills to. Whether
+	// that lines up is currently kept true by two separate branches in assembly
+	// agreeing, which is not the same as being checked.
+	for exporter, definition := range cc.Exporters {
+		storage, spills := spillStorageOf(definition)
+		if !spills {
+			continue
+		}
+		if !used["extension/"+storage] {
+			return fmt.Errorf(
+				"the %s exporter's sending queue spills to storage %q, which the config does not run — the collector would refuse this at load",
+				exporter, storage)
+		}
+	}
+
 	for kind, defined := range map[string]map[string]any{
 		"receiver": cc.Receivers, "processor": cc.Processors, "exporter": cc.Exporters,
 	} {
@@ -370,6 +386,23 @@ func (cc CollectorConfig) Validate() error {
 		}
 	}
 	return nil
+}
+
+// spillStorageOf is the storage extension an exporter's sending queue spills to,
+// and whether it spills at all. Reading it back out of the emitted map rather than
+// off the Backend keeps Validate a property of the config, checkable on one a
+// caller assembled or loaded.
+func spillStorageOf(exporter any) (string, bool) {
+	definition, isMap := exporter.(map[string]any)
+	if !isMap {
+		return "", false
+	}
+	queue, queued := definition["sending_queue"].(map[string]any)
+	if !queued {
+		return "", false
+	}
+	storage, spills := queue["storage"].(string)
+	return storage, spills && storage != ""
 }
 
 // YAML renders the config as a collector configuration file.

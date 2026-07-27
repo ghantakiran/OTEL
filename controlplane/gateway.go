@@ -79,9 +79,12 @@ type Backend struct {
 	Delivery Delivery `yaml:"delivery"`
 }
 
-// Receives reports whether this Backend takes a Signal.
+// Receives reports whether this Backend takes a Signal. An omitted `signals:` —
+// a nil slice — is every Signal. An empty list written out is refused at compile
+// rather than reaching here, since "none" read as "everything" would be the widest
+// gap possible between what was written and what runs.
 func (b Backend) Receives(signal contract.Signal) bool {
-	if len(b.Signals) == 0 {
+	if b.Signals == nil {
 		return true
 	}
 	return slices.Contains(b.Signals, string(signal))

@@ -240,7 +240,7 @@ It asserts, in order:
 4. **The Contract's `service.name`, not the sample service's.** The sample service sends `service.name: harness-sample-service`; what reaches the Backend says `checkout-api`, which is what `guardrail/examples/compliant-contract.yaml` declares. Only the compiled Agent config could have made that substitution, so it ran — this is *declared equals deployed* (ADR 0005) observed rather than asserted.
 5. **Fan-out per Signal, both directions.** The span does *not* reach the metrics-only Backend, which is running and would have printed it. A metric emitted next *does* reach it — and also reaches the primary APM, which takes every Signal.
 6. **The archive had no container at all** while 3–5 ran, so those assertions really were made against a Gateway holding a down Backend.
-7. **The archive's own queue drains when it comes up.** It receives the span emitted minutes earlier, which it cannot have had before: the Gateway held that span in *that Backend's* queue for the whole time it was serving the other two normally.
+7. **The archive's own queue drains when it comes up.** A span emitted while the archive had no container reaches it once it is started, which it cannot have had before: the Gateway held that span in *that Backend's* queue while serving the other two normally.
 
 ## What the harness proves, and what it does not
 
@@ -251,7 +251,7 @@ It asserts, in order:
 - The Gateway is genuinely in the path (the negative control).
 - The compiled Agent's `resource` processor stamps the Contract's attributes over whatever the service sent.
 - **Fan-out is per Signal**, observed on running Backends in both directions.
-- **One Backend being unreachable does not stop the others receiving**, and what that Backend missed was held in its own queue rather than dropped.
+- **One Backend being unreachable does not stop the others receiving**, and what that Backend missed was held in its own queue rather than dropped — for as long as its own `retry_on_failure` budget allows, which is the collector's 300s default since no Backend declares otherwise.
 
 **Does not prove:**
 
