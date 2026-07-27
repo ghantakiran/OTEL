@@ -1,0 +1,60 @@
+# The org's Gateway Declaration — the shape of the one shared Gateway.
+#
+# There is exactly one of these because there is exactly one Gateway tier. That
+# is what makes it a different kind of document from a Pipeline Profile:
+#
+#   controlplane/profiles.yaml   per Service Tier, many of them, selected by tier.
+#                                Configures a service's AGENT.
+#   controlplane/gateway.yaml    one shared piece of infrastructure, selected by
+#                                nobody. Configures the GATEWAY.
+#
+# A Profile could not own this. Three tier Profiles each naming a Gateway shape
+# would describe three Gateways, and the org runs one; merging them would give the
+# Gateway's shape no owner. So the Gateway's own shape is declared once, here
+# (ADR 0013), while facts that are genuinely per-tier stay in the Profile — the
+# tail-sampling budget `sampling.traces_percent` is the standing example, consumed
+# when tail sampling lands (C5, #13).
+#
+# Compiling cross-checks the two: every Profile's `gateway_endpoint` must be the
+# `address` below. An Agent forwarding to a port the Gateway does not listen on is
+# a topology that silently drops everything, and it is catchable here rather than
+# at 3am.
+#
+# WHAT IS DECLARED HERE, and why it is not elsewhere:
+#
+#   address           Where Agents reach the Gateway. One value, because every
+#                     Agent in the fleet forwards to the same place. The Gateway's
+#                     OTLP receiver is derived from its port.
+#   memory_limit_mib  The Gateway's memory ceiling. Higher than any Agent's: it
+#                     absorbs the whole fleet's telemetry, and nothing co-located
+#                     with it is degraded by its footprint.
+#   batch             How telemetry is regrouped on the way out. Agents batch per
+#                     service; the Gateway rebatches across all of them, which is
+#                     the point of having a Gateway at all.
+#   backends          Where telemetry lands. Declared here and nowhere else, which
+#                     is what "services are Backend-agnostic" means in practice
+#                     (ADR 0007): adding or swapping a Backend touches this file,
+#                     not the fleet.
+#
+# `delivery` is per Backend, not per Gateway, deliberately: one slow or unreachable
+# Backend must not block exports to the others (ADR 0010). Today exactly one
+# Backend compiles — fan-out to several lands with C5 (#13) — and a second entry
+# here is refused loudly rather than silently ignored.
+apiVersion: guardrail.otel/v1
+kind: GatewayDeclaration
+
+gateway:
+  address: otel-gateway.observability.svc.cluster.local:4317
+  memory_limit_mib: 1024
+  batch:
+    timeout: 5s
+    send_batch_size: 8192
+  backends:
+    - backend: primary-apm
+      description: >-
+        The org's primary APM Backend, reached over OTLP. Telemetry the org cannot
+        lose goes here, so the export is queued and retried.
+      endpoint: apm-otlp.observability.svc.cluster.local:4317
+      delivery:
+        queue_size: 20000
+        retry: true

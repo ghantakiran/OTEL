@@ -9,9 +9,11 @@
 #
 # These configure a service's AGENT: receive OTLP, limit memory, stamp the
 # Contract's resource attributes, batch, forward to the Gateway. An Agent does no
-# enforcement and names no Backend (ADR 0007) — Backend fan-out is the Gateway's
-# job and lands with C5. A service never edits this: pipeline shape is owned
-# centrally per tier (ADR 0005).
+# enforcement and names no Backend (ADR 0007) — naming Backends is the Gateway's
+# job, and the Gateway is declared in controlplane/gateway.yaml rather than here,
+# because there is one Gateway and it is neither per service nor per tier
+# (ADR 0013). A service never edits this: pipeline shape is owned centrally per
+# tier (ADR 0005).
 #
 # Every tier in the taxonomy selects exactly one Profile here. A tier with none
 # fails to compile loudly rather than defaulting to a pipeline nobody chose.
@@ -34,9 +36,9 @@
 # Head sampling is deliberately absent from every Profile. The Gateway
 # tail-samples with the whole trace in hand (ADR 0007), and an Agent dropping
 # spans first would hand it broken traces. sampling.traces_percent below is the
-# GATEWAY's tail-sampling budget, owned here because it is a per-tier cost
-# decision — it is consumed when the Gateway config compiles (C5, #13), and is
-# not emitted into an Agent config.
+# GATEWAY's tail-sampling budget, owned here rather than in the Gateway
+# Declaration because it is a per-tier cost decision (ADR 0013) — it is consumed
+# when tail sampling lands (C5, #13), and is not emitted into an Agent config.
 apiVersion: guardrail.otel/v1
 kind: PipelineProfileSet
 

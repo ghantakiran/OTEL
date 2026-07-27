@@ -24,7 +24,7 @@ Compiling is **not** checking. `otel-guardrail check` tells you whether a Contra
 
 ## What gets compiled
 
-An Agent receives OTLP, stamps the Contract's resource attributes, batches, and forwards to the Gateway. It names no **Backend** and does no enforcement — fan-out to Backends is the Gateway's job (ADR 0007), landing with C5.
+An Agent receives OTLP, stamps the Contract's resource attributes, batches, and forwards to the Gateway. It names no **Backend** and does no enforcement — naming Backends is the Gateway's job (ADR 0007), and the Gateway is compiled separately from the **Gateway Declaration**: see [the topology](./agent-gateway-topology.md). Fanning out to *several* Backends lands with C5.
 
 Stamping the resource attributes *from the Contract* is what makes **declared equals deployed** true by construction: the same file Preflight checked produces the running config, so the two cannot drift into disagreement.
 
@@ -72,7 +72,7 @@ A setting that would do nothing is not emitted. A Profile with no `delivery` and
 
 No Profile does head sampling at the Agent. The Gateway tail-samples with the whole trace in hand (ADR 0007), and an Agent dropping spans first would hand it broken traces.
 
-`sampling.traces_percent` is therefore the **Gateway's** tail-sampling budget for that tier — a per-tier cost decision the Profile owns, consumed when the Gateway config compiles (C5, #13). Nothing in an Agent config is derived from it today.
+`sampling.traces_percent` is therefore the **Gateway's** tail-sampling budget for that tier — a per-tier cost decision the Profile owns, consumed when tail sampling lands (C5, #13). It stays in the Profile rather than moving to the Gateway Declaration precisely because it varies by tier, which is the line ADR 0013 draws between the two documents. Nothing in an Agent config is derived from it today.
 
 ## What refuses to compile
 

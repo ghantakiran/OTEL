@@ -69,8 +69,12 @@ The central collector tier that receives from Agents, batches, tail-samples, and
 _Avoid_: Central collector, aggregator, proxy
 
 **Backend**:
-A destination system where telemetry lands (e.g. Splunk, a metrics store, a cold archive). The Gateway fans out to one or more Backends per the tier's Pipeline Profile; services never target a Backend directly.
+A destination system where telemetry lands (e.g. Splunk, a metrics store, a cold archive). The Gateway fans out to one or more Backends per the Gateway Declaration; services never target a Backend directly.
 _Avoid_: APM, sink, store, destination
+
+**Gateway Declaration**:
+The org's single description of the shared Gateway — the address Agents reach it on, how it rebatches, and which Backends it exports to. There is exactly one, because there is exactly one Gateway tier: unlike a Pipeline Profile it is neither per service nor per tier, and nothing selects it. Facts that genuinely vary by Service Tier (the tail-sampling budget) stay in the Profile.
+_Avoid_: Gateway Profile, gateway config, gateway manifest
 
 ### Guardrails
 
@@ -146,7 +150,8 @@ _Avoid_: Cutoff, go-live, launch date
 - The **Control Plane** **Compiles** a whole **Fleet** into a **Rollout**, indexed by a **Rollout Manifest**; merging that commit *is* the rollout.
 - A **Telemetry Contract** that does not **Compile** is recorded in the **Rollout Manifest** and keeps whatever collector configuration it last compiled to — it is skipped, never guessed at and never silently dropped.
 - An **Agent** forwards to a **Gateway**; the **Gateway** hosts **Pipeline Guardrails**.
-- A **Gateway** fans out to one or more **Backends**, defined in the **Pipeline Profile**; a service never targets a **Backend** directly.
+- A **Gateway** fans out to one or more **Backends**, defined in the **Gateway Declaration**; a service never targets a **Backend** directly.
+- The **Control Plane** **Compiles** the **Gateway Declaration** into the **Gateway**'s configuration, cross-checked against every **Pipeline Profile**: the address the Gateway answers on must be where the Profiles forward **Agents**.
 
 ## Example dialogue
 

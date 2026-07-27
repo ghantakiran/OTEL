@@ -113,6 +113,9 @@ jobs:
       - name: A tier-3 Contract compiles too — every tier has a Profile
         run: ./otel-guardrail compile guardrail/examples/tier-3-least-signals-contract.yaml
 
+      - name: The shared Gateway compiles, and agrees with every Pipeline Profile
+        run: ./otel-guardrail gateway
+
       - name: A Contract outside the Service Tier Taxonomy does not compile
         run: |
           if ./otel-guardrail compile guardrail/examples/unknown-tier-contract.yaml; then

@@ -1,0 +1,15 @@
+# The whole of what the harness adds to the compiled Agent config.
+#
+# The collector merges repeated --config flags, so the compiled file is mounted and
+# used byte for byte and this sits on top of it. Keeping the concession to one
+# visible file is the point: anything the harness needs that the compiler does not
+# produce is a gap, and a gap has to be readable.
+#
+# The compiled config is written for a cluster where the Gateway presents a
+# certificate. The harness runs on a docker bridge with none, so the Agent's OTLP
+# exporter — which defaults to TLS, as it should — is told the hop is plaintext.
+# Nothing else is overridden.
+exporters:
+  otlp/gateway:
+    tls:
+      insecure: true
