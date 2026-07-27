@@ -46,6 +46,32 @@ type GatewayDeclaration struct {
 	// Backends are where telemetry lands. Declared here and nowhere else, which is
 	// what makes a service Backend-agnostic (ADR 0007).
 	Backends []Backend `yaml:"backends"`
+	// SelfTelemetry is how the Gateway reports on itself: who it says it is, and
+	// which Backend its own signals go to. Required — a Gateway nobody can see is
+	// the failure ADR 0010 exists to prevent, and there is no status endpoint to
+	// fall back on.
+	SelfTelemetry SelfTelemetry `yaml:"self_telemetry"`
+}
+
+// SelfTelemetry is the Gateway's own place in the telemetry it carries.
+//
+// The Gateway is not a service and has no Telemetry Contract, so the two things a
+// Contract would have said — who this is, and where its telemetry goes — are said
+// here. Everything else about the platform's own signals is derived: the version
+// from the compiled config, the metrics from the collector's own instrumentation.
+type SelfTelemetry struct {
+	// Backend is the declared Backend the Gateway's own signals go to, DIRECTLY —
+	// not through the Gateway's own pipelines. That is the minimal independent
+	// export path ADR 0010 asks for: the signals report on the pipeline exporters,
+	// so they must not queue behind them. It is named rather than derived because
+	// "wherever metrics happen to go" would silently move the platform's own
+	// telemetry the day a Backend was added.
+	Backend string `yaml:"backend"`
+	// ResourceAttributes is who the Gateway says it is — the same declaration a
+	// service makes in its Telemetry Contract, for the one component that has none.
+	// It is checked against the Standards the Gateway itself enforces: a Gateway
+	// tagging the fleet for an attribute its own telemetry omits does not compile.
+	ResourceAttributes map[string]string `yaml:"resource_attributes"`
 }
 
 // Backend is one destination the Gateway exports to, reached over OTLP.

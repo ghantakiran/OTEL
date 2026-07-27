@@ -9,6 +9,24 @@
 # A service under not_compiled keeps whatever collector configuration it last
 # compiled to, if any: a broken Contract must not take a running service's
 # telemetry away.
+#
+# THE TWO HASHES BELOW ARE NOT INTERCHANGEABLE, and only one of them is a thing
+# to look for in telemetry:
+#
+#   digest          sha256 of the file named on the line above it, header and
+#                   config_version included. It answers "is that file in this
+#                   repo still the one this Rollout wrote?" — so a hand-edited
+#                   config_version is caught by it, and nothing else is.
+#   config_version  what that service's Agent reports about itself once this
+#                   Rollout reaches it. It is the sha256 of the collector
+#                   configuration with its own stamp excluded, so it identifies
+#                   the running pipeline rather than the file. THIS is the value
+#                   an operator waits to see fleet-wide; a Rollout is confirmed
+#                   when every service here reports the version written here, and
+#                   there is no status channel to ask instead (ADR 0010, 0016).
+#
+# They are never equal — the digest hashes a strict superset of what the version
+# hashes — so a value that matches both is a bug, not a coincidence.
 apiVersion: guardrail.otel/v1
 kind: RolloutManifest
 compiled:
@@ -20,7 +38,8 @@ compiled:
         - metrics
         - traces
       collector_config: compiled/orders-api.yaml
-      digest: sha256:e3a4ba4e94ad2ffc489b8232b59d1cd1328de9b57f4b27ec7b30f8460f358472
+      digest: sha256:c239ced94e505c9eb920753df85df1fce3e4356988e8b8b29bc2bc4dbff7ea51
+      config_version: sha256:df1d11f63fd44dff750eb7bf20092037b6a05e6f1f1f0193198cedc870cf5c36
     - service_name: payments-api
       tier: tier-1
       pipeline_profile: tier-1-critical
@@ -29,7 +48,8 @@ compiled:
         - metrics
         - traces
       collector_config: compiled/payments-api.yaml
-      digest: sha256:2913c3f01af53a1c4c25fb6db94bd7363402bd15e79a451ad29e5cc078aff269
+      digest: sha256:3dadca0057e5fdeb451d1f54bc5a88f08d6d2969cf0c8980fa2cfc32f0fb9473
+      config_version: sha256:3b04a21de671883f1d9ad933ba65d71642e76cafbc88bb4e21a25a52f3a44b45
     - service_name: reporting-worker
       tier: tier-2
       pipeline_profile: tier-2-supporting
@@ -37,5 +57,6 @@ compiled:
         - metrics
         - traces
       collector_config: compiled/reporting-worker.yaml
-      digest: sha256:1d6ceab9466d1078bcb92f6bb461cc53fd1edab85406041537bb4dbf3ddddac0
+      digest: sha256:f2cfc464dc083e305a21a86eb671bdef80ee838675c268ddd3d1e7556994f2e9
+      config_version: sha256:be9ad6d0ea22891cbb19beb56011d423e6476f0cb2dc971b3304fde7df8b88eb
 not_compiled: []

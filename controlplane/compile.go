@@ -48,6 +48,21 @@ func Compile(c contract.Contract, taxonomy *guardrail.Taxonomy, profiles *Profil
 		return CollectorConfig{}, fmt.Errorf("cannot compile %s: %w", c.ServiceName, err)
 	}
 
+	// The platform's namespace is what the platform says about ITSELF, and
+	// `otel.platform.config_version` is the single field an operator reads to decide
+	// whether a Rollout has landed. A Contract declaring anything under it would
+	// compile to a resource processor upserting it onto every record the service
+	// emits — a service answering, for itself, the one question there is no status
+	// channel to ask (ADR 0010). Refused here, where it was written, rather than
+	// stripped later where the declaration would still read as honoured.
+	for _, attribute := range sorted(attributeNamesOf(c)) {
+		if inThePlatformNamespace(attribute) {
+			return CollectorConfig{}, fmt.Errorf(
+				"cannot compile %s: its Telemetry Contract declares the resource attribute %q, and the %s namespace is what the platform says about its own collectors — a service stamping it would be answering the question a Rollout is confirmed by (drop it from `resource_attributes:`)",
+				c.ServiceName, attribute, platformNamespace)
+		}
+	}
+
 	// The compiled config must route every Signal the tier mandates. A pipeline
 	// missing one would mean the fleet quietly not collecting telemetry the org
 	// requires — and the Contract would still read as compliant.
@@ -57,7 +72,7 @@ func Compile(c contract.Contract, taxonomy *guardrail.Taxonomy, profiles *Profil
 			c.ServiceName, c.Tier, strings.Join(missing, ", "))
 	}
 
-	return assemble(c, profile, declared), nil
+	return assemble(c, profile, declared)
 }
 
 // CompileGateway turns the org's Gateway Declaration into collector configuration
@@ -200,6 +215,10 @@ func CompileGateway(declaration *GatewayDeclaration, profiles *ProfileSet, stand
 		}
 	}
 
+	if err := validSelfTelemetry(declaration, standards); err != nil {
+		return CollectorConfig{}, fmt.Errorf("cannot compile the Gateway: %w", err)
+	}
+
 	// Every Agent forwards every Signal it collects here, so a Signal no Backend
 	// takes is a pipeline that receives the fleet's telemetry and exports it
 	// nowhere. It is the no-Backend failure one Signal at a time, and just as
@@ -210,7 +229,124 @@ func CompileGateway(declaration *GatewayDeclaration, profiles *ProfileSet, stand
 			strings.Join(orphaned, ", "))
 	}
 
-	return assembleGateway(*declaration, standards), nil
+	return assembleGateway(*declaration, standards)
+}
+
+// validSelfTelemetry checks the Gateway can be seen at all, and that what it says
+// about itself is something it would accept from anybody else.
+//
+// Every refusal here is a Gateway that would run perfectly and be invisible, or
+// visible and wrong. There is no status endpoint to fall back on and none is
+// going to be built (ADR 0010), so this is the only place any of it is caught.
+func validSelfTelemetry(declaration *GatewayDeclaration, standards *guardrail.StandardCatalog) error {
+	self := declaration.SelfTelemetry
+
+	// A Gateway that reports nothing about itself looks exactly like a Gateway that
+	// is healthy: no config_version to confirm a Rollout against, and no queue depth
+	// when a Backend stops answering. The whole fleet's telemetry goes through this
+	// one process.
+	if self.Backend == "" {
+		return fmt.Errorf(
+			"it declares no `self_telemetry:` backend, so the Gateway would emit no telemetry about itself — no config_version to confirm a Rollout by and no queue depth when a Backend stops answering, and there is no status channel to ask instead (ADR 0010)")
+	}
+
+	// Its own signals go straight to this Backend, so a name that is not one is a
+	// Gateway exporting its own telemetry into nothing — and nothing about that is
+	// visible from anywhere, because the thing that would have reported it is the
+	// thing that is lost.
+	receiver, declared := backendNamed(declaration.Backends, self.Backend)
+	if !declared {
+		return fmt.Errorf(
+			"its `self_telemetry:` sends the Gateway's own signals to Backend %q, which it does not declare — they would be exported into nothing, and the telemetry that would have said so is the telemetry being lost (declared: %v)",
+			self.Backend, backendNames(declaration.Backends))
+	}
+	// The platform's own signals are metrics. Sending them to a Backend that
+	// declares it does not receive metrics produces export failures that look
+	// exactly like that Backend being down — the failure mode a per-Signal fan-out
+	// exists to remove, reintroduced on the one stream that reports on the rest.
+	if !receiver.Receives(contract.SignalMetrics) {
+		return fmt.Errorf(
+			"its `self_telemetry:` sends the Gateway's own signals to Backend %q, which declares `signals: %v` and so does not receive metrics — the platform's own signals are metrics, and exporting them there would fail in a way indistinguishable from that Backend being down",
+			self.Backend, receiver.Signals)
+	}
+
+	// A Gateway that says nothing about who it is emits telemetry under whatever the
+	// collector defaults to — `service.name: otelcol` — so every Gateway on every
+	// platform looks the same in a Backend and none of them can be found.
+	//
+	// Refused on its own rather than left to the Standards check below, because that
+	// check borrows its strictness from the catalog: a catalog whose pipeline
+	// Standards all happen to be `warn` would have nothing to say, and the identity
+	// would go missing exactly when nothing was watching. It is the empty-catalog
+	// disarm ADR 0015 refuses, one layer further out.
+	if len(self.ResourceAttributes) == 0 {
+		return fmt.Errorf(
+			"its `self_telemetry:` declares no `resource_attributes:`, so the Gateway's own telemetry would arrive under whatever the collector defaults to and could not be told from any other collector's — the Gateway has no Telemetry Contract, so this is where it says who it is")
+	}
+
+	// The Gateway has no Telemetry Contract, so nothing else checks who it says it
+	// is. Every `block` Standard it tags the fleet with, it has to satisfy itself: a
+	// Gateway marking a service's telemetry blocking for a missing attribute while
+	// its own telemetry omits the same attribute is the platform exempting itself
+	// from the rule it enforces, and it would never show up anywhere.
+	//
+	// Only `block`, and for the same reason only `block` fails a build at Preflight
+	// (ADR 0003): a `warn` Standard is advice, and refusing to compile over advice
+	// would make Severity mean something different here than everywhere else.
+	for _, standard := range standards.PipelineEnforced() {
+		if standard.Severity != guardrail.SeverityBlock {
+			continue
+		}
+		for _, attribute := range standard.Requires.ResourceAttributes {
+			if self.ResourceAttributes[attribute] == "" {
+				return fmt.Errorf(
+					"its `self_telemetry.resource_attributes:` omits %q, which Standard %s requires at the pipeline and tags as %s — the Gateway would mark every service's telemetry for an attribute its own telemetry does not carry",
+					attribute, standard.ID, standard.Severity)
+			}
+		}
+	}
+
+	// The same namespace a Telemetry Contract may not claim, refused for the same
+	// reason: `otel.platform.config_version` is derived from the compiled config,
+	// and a declaration setting it by hand would have the Gateway announce a
+	// configuration it is not running.
+	for _, attribute := range sorted(keysOf(self.ResourceAttributes)) {
+		if inThePlatformNamespace(attribute) {
+			return fmt.Errorf(
+				"its `self_telemetry.resource_attributes:` declares %q, and the %s namespace is derived from the compiled configuration rather than written — a declared one would have the Gateway announce a configuration it is not running",
+				attribute, platformNamespace)
+		}
+	}
+	return nil
+}
+
+// backendNamed is the declared Backend with a given name.
+func backendNamed(backends []Backend, name string) (Backend, bool) {
+	for _, backend := range backends {
+		if backend.Name == name {
+			return backend, true
+		}
+	}
+	return Backend{}, false
+}
+
+// backendNames is every declared Backend's name, for an error that has to say
+// what the caller could have written instead.
+func backendNames(backends []Backend) []string {
+	names := make([]string, 0, len(backends))
+	for _, backend := range backends {
+		names = append(names, backend.Name)
+	}
+	return names
+}
+
+// keysOf is a map's keys, unordered.
+func keysOf(values map[string]string) []string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	return keys
 }
 
 // signalsNoBackendReceives is every Signal that no declared Backend takes.
@@ -298,6 +434,15 @@ func missingFrom(declared []contract.Signal, mandatory []string) []string {
 	}
 	sort.Strings(missing)
 	return missing
+}
+
+// attributeNamesOf is every resource attribute key a Contract declares.
+func attributeNamesOf(c contract.Contract) []string {
+	names := make([]string, 0, len(c.ResourceAttributes))
+	for name := range c.ResourceAttributes {
+		names = append(names, name)
+	}
+	return names
 }
 
 func sorted(values []string) []string {

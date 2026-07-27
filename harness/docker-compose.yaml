@@ -109,6 +109,65 @@ services:
     networks:
       - otel
 
+  # THE SAME SERVICE'S AGENT AFTER A ROLLOUT. Compiled from the same Telemetry
+  # Contract as `agent` and a Pipeline Profile that differs by one field
+  # (harness/rolled-out-profiles.yaml), so it is a different pipeline announcing a
+  # different config_version.
+  #
+  # run.sh stops `agent` before starting this one, so what the Backend sees
+  # afterwards is one Agent for this service, on the new configuration — which is
+  # what a rollout leaves behind, and the only way this platform confirms one.
+  agent-rolled-out:
+    image: otel/opentelemetry-collector:0.127.0
+    profiles: [rollout]
+    command:
+      - --config=/etc/otelcol/compiled.yaml
+      - --config=/etc/otelcol/insecure.yaml
+    volumes:
+      - ./generated/agent-rolled-out.yaml:/etc/otelcol/compiled.yaml:ro
+      - ./insecure/agent.yaml:/etc/otelcol/insecure.yaml:ro
+    networks:
+      - otel
+
+  # THE COMPILED CONFIGS, RUN WITH NO OVERLAY AT ALL — both of them, on their own
+  # pinned images, started and then thrown away.
+  #
+  # They exist because of what the overlay below has to do to the self-telemetry
+  # reader. `service.telemetry.metrics.readers` is a LIST, and confmap replaces a
+  # list rather than merging it, so the plaintext concession cannot be a two-line
+  # addition the way `tls: insecure` is — the harness has to restate the whole
+  # reader, and a restated reader is one the compiler's version of never runs.
+  #
+  # A malformed reader is a START-UP failure (the SDK is built before the first
+  # pipeline byte moves), so starting the compiled file unaltered is exactly the
+  # assertion that closes the gap. It found a real one while this slice was being
+  # written: `protocol: grpc/protobuf` passes `otelcol validate` and then refuses
+  # to start.
+  #
+  # Profile-gated, so `up` never brings them, and run.sh removes them before the
+  # negative control. Neither carries a network alias, so nothing routes to them.
+  agent-as-compiled:
+    image: otel/opentelemetry-collector:0.127.0
+    profiles: [ascompiled]
+    command:
+      - --config=/etc/otelcol/compiled.yaml
+    volumes:
+      - ./generated/agent.yaml:/etc/otelcol/compiled.yaml:ro
+    networks:
+      - otel
+
+  gateway-as-compiled:
+    image: otel/opentelemetry-collector-contrib:0.127.0
+    profiles: [ascompiled]
+    command:
+      - --config=/etc/otelcol/compiled.yaml
+    volumes:
+      - ./generated/gateway.yaml:/etc/otelcol/compiled.yaml:ro
+    tmpfs:
+      - /var/lib/otelcol/spill
+    networks:
+      - otel
+
   # Backend stand-in 1 of 3: the primary APM. Takes every Signal, and is the
   # healthy Backend the fan-out assertions are made against.
   backend:

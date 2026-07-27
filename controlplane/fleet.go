@@ -142,6 +142,18 @@ type CompiledService struct {
 	Signals     []string // the Signals its collector configuration routes
 	Path        string   // relative to the Fleet root
 	Digest      string   // sha256 of the file at Path, as sha256:<hex>
+	// ConfigVersion is what this service's Agent will report about itself once this
+	// Rollout has reached it — the value an operator waits to see fleet-wide, since
+	// there is no status back-channel to ask (ADR 0010).
+	//
+	// It is NOT the Digest and the two are never equal. The Digest hashes this file,
+	// header and stamp included, and answers "is the file in the repo still the one
+	// this Rollout wrote?". The ConfigVersion hashes the collector configuration
+	// with its own stamp excluded, and answers "is the pipeline running out there
+	// the one this Rollout compiled?". Only the second can be compared against
+	// telemetry; comparing the first to a version seen in a Backend is a category
+	// error. See ADR 0016.
+	ConfigVersion string
 
 	contents []byte
 }
@@ -197,13 +209,14 @@ func CompileFleet(fleet *Fleet, taxonomy *guardrail.Taxonomy, profiles *ProfileS
 		profile, _ := profiles.For(entry.declared.Tier)
 		contents := append(generatedHeader(entry, profile.Name), rendered...)
 		rollout.Compiled = append(rollout.Compiled, CompiledService{
-			ServiceName: entry.declared.ServiceName,
-			Tier:        entry.declared.Tier,
-			Profile:     profile.Name,
-			Signals:     config.Signals(),
-			Path:        entry.compiledPath(),
-			Digest:      digestOf(contents),
-			contents:    contents,
+			ServiceName:   entry.declared.ServiceName,
+			Tier:          entry.declared.Tier,
+			Profile:       profile.Name,
+			Signals:       config.Signals(),
+			Path:          entry.compiledPath(),
+			Digest:        digestOf(contents),
+			ConfigVersion: config.ConfigVersion(),
+			contents:      contents,
 		})
 	}
 	return rollout, nil
@@ -285,12 +298,13 @@ func (r Rollout) ManifestYAML() ([]byte, error) {
 	}
 	for _, service := range r.Compiled {
 		document.Compiled = append(document.Compiled, manifestCompiled{
-			ServiceName: service.ServiceName,
-			Tier:        service.Tier,
-			Profile:     service.Profile,
-			Signals:     service.Signals,
-			Config:      service.Path,
-			Digest:      service.Digest,
+			ServiceName:   service.ServiceName,
+			Tier:          service.Tier,
+			Profile:       service.Profile,
+			Signals:       service.Signals,
+			Config:        service.Path,
+			Digest:        service.Digest,
+			ConfigVersion: service.ConfigVersion,
 		})
 	}
 	for _, service := range r.Failed {
@@ -319,12 +333,13 @@ type manifestDocument struct {
 }
 
 type manifestCompiled struct {
-	ServiceName string   `yaml:"service_name"`
-	Tier        string   `yaml:"tier"`
-	Profile     string   `yaml:"pipeline_profile"`
-	Signals     []string `yaml:"signals"`
-	Config      string   `yaml:"collector_config"`
-	Digest      string   `yaml:"digest"`
+	ServiceName   string   `yaml:"service_name"`
+	Tier          string   `yaml:"tier"`
+	Profile       string   `yaml:"pipeline_profile"`
+	Signals       []string `yaml:"signals"`
+	Config        string   `yaml:"collector_config"`
+	Digest        string   `yaml:"digest"`
+	ConfigVersion string   `yaml:"config_version"`
 }
 
 type manifestNotCompiled struct {
@@ -345,6 +360,24 @@ const manifestHeader = `# The Rollout Manifest: what the last fleet-wide Compile
 # A service under not_compiled keeps whatever collector configuration it last
 # compiled to, if any: a broken Contract must not take a running service's
 # telemetry away.
+#
+# THE TWO HASHES BELOW ARE NOT INTERCHANGEABLE, and only one of them is a thing
+# to look for in telemetry:
+#
+#   digest          sha256 of the file named on the line above it, header and
+#                   config_version included. It answers "is that file in this
+#                   repo still the one this Rollout wrote?" — so a hand-edited
+#                   config_version is caught by it, and nothing else is.
+#   config_version  what that service's Agent reports about itself once this
+#                   Rollout reaches it. It is the sha256 of the collector
+#                   configuration with its own stamp excluded, so it identifies
+#                   the running pipeline rather than the file. THIS is the value
+#                   an operator waits to see fleet-wide; a Rollout is confirmed
+#                   when every service here reports the version written here, and
+#                   there is no status channel to ask instead (ADR 0010, 0016).
+#
+# They are never equal — the digest hashes a strict superset of what the version
+# hashes — so a value that matches both is a bug, not a coincidence.
 `
 
 // compiledPath is where this entry's collector configuration lands, derived from

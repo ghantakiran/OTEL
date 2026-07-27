@@ -1,0 +1,37 @@
+# A Pipeline Profile set that differs from the org's by ONE FIELD, so the harness
+# can drive a Rollout and watch the fleet confirm it.
+#
+# It lives here rather than in guardrail/examples/ because it is not an example of
+# anything: it is the second half of a before-and-after. run.sh compiles the same
+# Telemetry Contract twice — once against controlplane/profiles.yaml and once
+# against this — and the two compiled Agents differ only in their batch timeout and
+# in the config_version that identifies them.
+#
+# That is the whole rollout drill, and it is the only way to confirm one on this
+# platform. There is no status endpoint to poll and none is going to be built
+# (ADR 0010): the Agent is restarted on the new file, and the Rollout is confirmed
+# when the version the compiler predicted turns up in telemetry, in a Backend,
+# beside the fleet's own.
+#
+# tier-1 only, because the Contract the harness compiles is tier-1. The
+# gateway_endpoint is unchanged and has to be: an Agent forwarding somewhere else
+# would prove nothing about a rollout and everything about a broken topology.
+apiVersion: guardrail.otel/v1
+kind: PipelineProfileSet
+
+profiles:
+  - profile: tier-1-critical
+    tiers: [tier-1]
+    description: >-
+      The tier-1 Profile after a Rollout that halved its batch timeout. One field,
+      reaching one line of the compiled config, and therefore a new config_version.
+    gateway_endpoint: otel-gateway.observability.svc.cluster.local:4317
+    memory_limit_mib: 512
+    batch:
+      timeout: 2s
+      send_batch_size: 8192
+    delivery:
+      queue_size: 10000
+      retry: true
+    sampling:
+      traces_percent: 100

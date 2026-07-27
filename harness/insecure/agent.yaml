@@ -8,8 +8,40 @@
 # The compiled config is written for a cluster where the Gateway presents a
 # certificate. The harness runs on a docker bridge with none, so the Agent's OTLP
 # exporter — which defaults to TLS, as it should — is told the hop is plaintext.
-# Nothing else is overridden.
+#
+# THE SECOND CONCESSION IS BIGGER THAN THE FIRST, and it is the one to read.
+#
+# The Agent's OWN telemetry goes to the Gateway over a periodic OTLP reader, and
+# the compiled config sends it over gRPC to `https://<gateway>` — the same address
+# and the same transport as everything else on this platform. In the pinned
+# collector (0.127.0) that reader has NO PLAINTEXT MODE: `insecure: true` is
+# accepted and ignored, and an `http://` scheme does not reach the gRPC branch, so
+# it dials TLS regardless. OTLP/HTTP does honour the scheme, so that is what the
+# harness speaks instead — to the Gateway's HTTP port, which insecure/gateway.yaml
+# opens for the same reason.
+#
+# `readers:` is a LIST, and confmap replaces a list rather than merging into it, so
+# this cannot be a two-line override: the whole reader is restated, and the
+# compiler's reader therefore does not run here. What still comes from the compiled
+# file is the RESOURCE — including `otel.platform.config_version`, which is what
+# the harness asserts on. What is not covered is whether the compiled reader itself
+# loads, and `agent-as-compiled` in docker-compose.yaml exists to cover exactly
+# that: it starts the compiled file with no overlay at all.
+#
+# The interval is the compiled one, deliberately. Shortening it here would make the
+# harness confirm a rollout faster than a deployment ever could.
 exporters:
   otlp/gateway:
     tls:
       insecure: true
+
+service:
+  telemetry:
+    metrics:
+      readers:
+        - periodic:
+            interval: 30000
+            exporter:
+              otlp:
+                protocol: http/protobuf
+                endpoint: http://otel-gateway.observability.svc.cluster.local:4318/v1/metrics

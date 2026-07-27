@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"path"
+	"regexp"
 	"sort"
 
 	"gopkg.in/yaml.v3"
@@ -42,6 +43,13 @@ type CollectorService struct {
 	// means a queue that silently is not persistent.
 	Extensions []string            `yaml:"extensions,omitempty"`
 	Pipelines  map[string]Pipeline `yaml:"pipelines"`
+	// Telemetry is what this collector says about ITSELF — the configuration it is
+	// running, and its own queue, export-failure and drop counters — and the path
+	// it says it on. That path is deliberately not one of the pipelines above: the
+	// signals exist to report on those, so they must not travel through them
+	// (ADR 0010). Omitted entirely when absent, so a config assembled by a caller
+	// renders exactly as it did before this field existed.
+	Telemetry *CollectorTelemetry `yaml:"telemetry,omitempty"`
 }
 
 // Pipeline is one Signal's path through a collector.
@@ -67,7 +75,7 @@ const (
 
 // assemble builds the config from the three inputs. Kept separate from Compile so
 // that Compile reads as the decisions and this reads as the shape.
-func assemble(c contract.Contract, profile Profile, signals []contract.Signal) CollectorConfig {
+func assemble(c contract.Contract, profile Profile, signals []contract.Signal) (CollectorConfig, error) {
 	config := CollectorConfig{
 		Receivers: map[string]any{
 			otlpReceiver: map[string]any{
@@ -114,12 +122,26 @@ func assemble(c contract.Contract, profile Profile, signals []contract.Signal) C
 			Exporters:  []string{gatewayExporter},
 		}
 	}
-	return config
+
+	// The Agent's own telemetry, on its own path to the Gateway. Its identity is
+	// the service's — the same Telemetry Contract the resource processor stamps —
+	// because an Agent is that service's Agent: an operator asking why this
+	// service's telemetry is thin wants the Agent's queue depth filed under the
+	// service, not under a thousandth anonymous collector.
+	//
+	// It is the SAME address the pipeline forwards to and a DIFFERENT client: the
+	// Gateway is the only hop an Agent knows (ADR 0007), so independence here means
+	// independence from the exporter, not from the Gateway.
+	config.Service.Telemetry = selfTelemetry(c.ResourceAttributes, profile.GatewayEndpoint)
+	if err := config.stampConfigVersion(); err != nil {
+		return CollectorConfig{}, err
+	}
+	return config, nil
 }
 
 // assembleGateway builds the shared Gateway's config: receive OTLP from the
 // fleet's Agents, rebatch across all of them, export to a Backend.
-func assembleGateway(declaration GatewayDeclaration, standards *guardrail.StandardCatalog) CollectorConfig {
+func assembleGateway(declaration GatewayDeclaration, standards *guardrail.StandardCatalog) (CollectorConfig, error) {
 	config := CollectorConfig{
 		Receivers: map[string]any{
 			otlpReceiver: map[string]any{
@@ -211,7 +233,33 @@ func assembleGateway(declaration GatewayDeclaration, standards *guardrail.Standa
 			Exporters:  exporters,
 		}
 	}
-	return config
+
+	// The Gateway's own telemetry, straight to one Backend and past everything
+	// above it. Not through a pipeline, so: not behind the memory limiter that is
+	// refusing data, not tagged by the Guardrail (its own signals are not a service
+	// making a claim), not batched, and above all not queued behind the exporter
+	// whose queue depth it is reporting. This is the "direct Backend route not
+	// gated on the same failing exporter" ADR 0010 asks for, and it is why one
+	// Backend stalling is answerable rather than inferred.
+	config.Service.Telemetry = selfTelemetry(
+		declaration.SelfTelemetry.ResourceAttributes,
+		endpointOf(declaration, declaration.SelfTelemetry.Backend),
+	)
+	if err := config.stampConfigVersion(); err != nil {
+		return CollectorConfig{}, err
+	}
+	return config, nil
+}
+
+// endpointOf is a named Backend's endpoint, or "" if the declaration has no such
+// Backend. CompileGateway has already refused the second case.
+func endpointOf(declaration GatewayDeclaration, name string) string {
+	for _, backend := range declaration.Backends {
+		if backend.Name == name {
+			return backend.Endpoint
+		}
+	}
+	return ""
 }
 
 // backendExporter is the collector component ID for a Backend's exporter. Named
@@ -299,7 +347,7 @@ func resourceAttributes(c contract.Contract) []any {
 	}
 	sort.Strings(keys)
 
-	actions := make([]any, 0, len(keys))
+	actions := make([]any, 0, len(keys)+1)
 	for _, key := range keys {
 		actions = append(actions, map[string]any{
 			"key":    key,
@@ -307,7 +355,22 @@ func resourceAttributes(c contract.Contract) []any {
 			"action": "upsert",
 		})
 	}
-	return actions
+
+	// LAST, unconditionally: strip the namespace the platform uses to describe its
+	// own collectors. Nothing stops a service's SDK setting
+	// otel.platform.config_version on its resource, and an Agent forwards what it is
+	// given — so the one field a Rollout is confirmed by would be answerable by the
+	// thing being rolled out. The Gateway cannot do this instead: by the time
+	// telemetry reaches it, an Agent's legitimate stamp and a service's forgery are
+	// the same attribute on the same kind of record. The Agent can, because its own
+	// signals do not travel its own pipelines.
+	//
+	// After the upserts rather than before, so that nothing — including a Contract
+	// that somehow reached here declaring one — can put the namespace back.
+	return append(actions, map[string]any{
+		"action":  "delete",
+		"pattern": "^" + regexp.QuoteMeta(platformNamespace),
+	})
 }
 
 // Collects reports whether the config has a pipeline for a Signal.
@@ -387,6 +450,25 @@ func (cc CollectorConfig) Validate() error {
 				"the %s exporter's sending queue spills to storage %q, which the config does not run — the collector would refuse this at load",
 				exporter, storage)
 		}
+	}
+
+	// A collector that runs pipelines has to report on itself, and the report has to
+	// be one somebody could act on. All three of these read as self-observation and
+	// deliver none: no block at all, readers with nowhere to go, or a report with no
+	// config_version — a collector an operator can see and cannot match to a
+	// Rollout. It is the spill failure again — configured, inert, indistinguishable
+	// from working — and there is no status channel to notice it from (ADR 0010),
+	// which is exactly why the refusal has to be here.
+	//
+	// A completeness check rather than referential integrity, like the refusal of a
+	// config that runs no pipelines above it.
+	switch {
+	case cc.Service.Telemetry == nil:
+		return fmt.Errorf("the config emits no telemetry about itself, so the collector running it would be invisible on the fleet and indistinguishable from one that is healthy")
+	case len(cc.Service.Telemetry.Metrics.Readers) == 0:
+		return fmt.Errorf("the config declares its own telemetry but names no reader for it, so it emits nothing about itself while reading as though it does")
+	case cc.ConfigVersion() == "":
+		return fmt.Errorf("the config emits telemetry about itself but no %s, so nothing it reports could be matched to a Rollout", configVersionAttribute)
 	}
 
 	for kind, defined := range map[string]map[string]any{

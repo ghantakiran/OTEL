@@ -1,6 +1,5 @@
 # The whole of what the harness adds to the compiled Gateway config. See
-# insecure/agent.yaml — same concession, the Gateway-to-Backend hop this time, once
-# per Backend the Gateway fans out to.
+# insecure/agent.yaml — same concessions, the Gateway's hops this time.
 #
 # Each exporter name here is derived from a Backend's name in
 # controlplane/gateway.yaml (`backend: primary-apm` compiles to `otlp/primary-apm`).
@@ -11,6 +10,40 @@
 # Nothing here touches the spill extensions. `file_storage` is not a network
 # component and needs no TLS concession — what it needs is a writable directory at
 # the Gateway's spill_root, which docker-compose.yaml mounts.
+#
+# THE TWO SELF-TELEMETRY CONCESSIONS, and why each is here rather than compiled:
+#
+#   receivers.otlp.protocols.http   The compiled Gateway listens on gRPC only, at
+#                                   the one address every Pipeline Profile forwards
+#                                   Agents to. It is opened here because the
+#                                   AGENTS' own telemetry has to arrive over
+#                                   OTLP/HTTP in this harness — see
+#                                   insecure/agent.yaml for why gRPC cannot be
+#                                   plaintext in the pinned collector. A deployment
+#                                   needs no such port: there, the Agents' reader
+#                                   speaks gRPC to the address above it.
+#   service.telemetry.metrics       The Gateway's OWN telemetry, restated over
+#                                   OTLP/HTTP to the primary APM's plaintext port,
+#                                   for the same reason. `readers:` is a list, and
+#                                   confmap replaces a list rather than merging it,
+#                                   so the whole reader has to be written out. The
+#                                   RESOURCE — including the compiled
+#                                   `otel.platform.config_version` — still comes
+#                                   from the compiled file, which is what run.sh
+#                                   asserts on. That the compiled reader itself
+#                                   loads is covered by `gateway-as-compiled`.
+#
+# The destination is the Backend the Gateway Declaration names under
+# `self_telemetry.backend`, on its OTLP/HTTP port. It is still not one of the
+# Gateway's own exporters, and it still has no queue, no retry and no batch — so
+# the property the compiled config has, the harness has too: a stalled Backend
+# cannot hold up the telemetry that says it stalled.
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: 0.0.0.0:4318
+
 exporters:
   otlp/primary-apm:
     tls:
@@ -21,3 +54,14 @@ exporters:
   otlp/cold-archive:
     tls:
       insecure: true
+
+service:
+  telemetry:
+    metrics:
+      readers:
+        - periodic:
+            interval: 30000
+            exporter:
+              otlp:
+                protocol: http/protobuf
+                endpoint: http://apm-otlp.observability.svc.cluster.local:4318/v1/metrics

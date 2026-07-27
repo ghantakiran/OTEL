@@ -42,8 +42,23 @@
 #      started — which it cannot have had before. The Gateway held that span in the
 #      ARCHIVE's OWN queue while serving the other two normally, which is
 #      per-Backend isolation observed rather than asserted.
+#   9. PLATFORM SELF-OBSERVATION. Both compiled configs start on their pinned
+#      images with NO overlay at all, which is the only thing that exercises the
+#      self-telemetry reader as compiled. Then the Agent's and the Gateway's own
+#      config_version arrive in a Backend — different values, each the one the
+#      compiler predicted — and a Rollout is driven by recompiling the Agent
+#      against a changed Pipeline Profile and restarting it: the NEW version turns
+#      up, confirmed by telemetry and by no status channel (ADR 0010, ADR 0016).
+#  10. PER-BACKEND BACK-PRESSURE. While cold-archive is unreachable, the Gateway's
+#      own metrics show ITS queue holding batches and ITS enqueue failures rising,
+#      with primary-apm's queue at zero throughout — one Backend's back-pressure,
+#      attributed to that Backend, arriving over a path that does not go through
+#      any of the exporters it is reporting on.
 #
-# Needs: docker, docker compose, go. Takes about two minutes.
+# Needs: docker, docker compose, go. Takes about eight minutes — the platform's
+# own telemetry is exported on a 30-second timer, which is the compiled interval
+# and deliberately not shortened here: a harness that confirmed a Rollout faster
+# than a deployment ever could would be measuring itself.
 # Read docs/agent-gateway-topology.md for what this does and does not prove.
 #
 # Usage: bash harness/run.sh [--keep]
@@ -64,7 +79,7 @@ compose() { docker compose --project-directory "$here" -f "$here/docker-compose.
 # down would leave the archive Backend from a previous run standing — and the run
 # after that would assert against a Backend that was never down. Every teardown
 # names both profiles.
-teardown() { compose --profile emit --profile recover down -v --remove-orphans "$@"; }
+teardown() { compose --profile emit --profile recover --profile ascompiled --profile rollout down -v --remove-orphans "$@"; }
 
 say() { printf '\n\033[1m== %s\033[0m\n' "$*"; }
 ok() { printf '  \033[32mok\033[0m   %s\n' "$*"; }
@@ -76,7 +91,7 @@ bad() {
 failed=0
 cleanup() {
 	if [ "$keep" = true ]; then
-		printf '\nContainers left running. Tear them down with:\n  docker compose --project-directory %s -f %s --profile emit --profile recover down -v\n' "$here" "$here/docker-compose.yaml"
+		printf '\nContainers left running. Tear them down with:\n  docker compose --project-directory %s -f %s --profile emit --profile recover --profile ascompiled --profile rollout down -v\n' "$here" "$here/docker-compose.yaml"
 		return
 	fi
 	say "Tearing down"
@@ -180,6 +195,26 @@ emit_metric() {
 	fi
 }
 
+# captured writes one container's log to a file and echoes the path.
+#
+# TO A FILE, AND NOT DOWN A PIPE, and this is load-bearing rather than tidy.
+# `compose logs X | grep -q needle` looks obviously correct and is not: `grep -q`
+# exits at the first match, the write end gets SIGPIPE, `compose logs` dies with
+# 141, and `set -o pipefail` reports the whole pipeline as failed — so a needle
+# that IS present reads as absent. It only bites once the log is big enough for
+# `grep` to finish before `compose logs` does, which is why every assertion here
+# passed for two slices and then several started failing the moment C7's
+# self-telemetry made the logs large.
+#
+# `--no-log-prefix` because the awk below reads a metric's name and its data
+# point's attributes from separate lines by column, and `backend-1  | ` in front
+# of every one of them shifts every column.
+captured() {
+	local service="$1"
+	compose --profile recover --profile rollout logs --no-log-prefix "$service" >"$generated/$service.log" 2>&1
+	echo "$generated/$service.log"
+}
+
 # arrived polls one Backend's log for a string, up to a deadline.
 #
 # -F here and below: every needle is a literal — a trace ID, an attribute name, a
@@ -191,7 +226,7 @@ arrived() {
 	local seconds="$3"
 	local deadline=$((SECONDS + seconds))
 	while [ "$SECONDS" -lt "$deadline" ]; do
-		if compose logs "$backend" 2>&1 | grep -qF -- "$needle"; then return 0; fi
+		if grep -qF -- "$needle" "$(captured "$backend")"; then return 0; fi
 		sleep 2
 	done
 	return 1
@@ -204,7 +239,7 @@ logged() {
 	local seconds="$3"
 	local deadline=$((SECONDS + seconds))
 	while [ "$SECONDS" -lt "$deadline" ]; do
-		if compose logs "$service" 2>&1 | grep -qF -- "$needle"; then return 0; fi
+		if grep -qF -- "$needle" "$(captured "$service")"; then return 0; fi
 		sleep 2
 	done
 	return 1
@@ -214,8 +249,54 @@ ready() {
 	local service="$1"
 	local deadline=$((SECONDS + 60))
 	while [ "$SECONDS" -lt "$deadline" ]; do
-		if compose logs "$service" 2>&1 | grep -qF "Everything is ready"; then return 0; fi
+		if grep -qF "Everything is ready" "$(captured "$service")"; then return 0; fi
 		sleep 1
+	done
+	return 1
+}
+
+# stamped_version reads the config_version out of a COMPILED config file. It is
+# what the compiler says this collector will announce, and the harness compares
+# telemetry against it rather than against a value written here — a hard-coded
+# expectation would pass while the compiler and the collector disagreed.
+stamped_version() {
+	sed -n 's/^ *otel\.platform\.config_version: *//p' "$1" | head -1
+}
+
+# collector_metric reports the LAST value a Backend saw for one of the platform's
+# own metrics, for one exporter.
+#
+# The debug exporter prints a metric's name once and then each data point with its
+# attributes, so name and attribute have to be carried forward across lines — a
+# grep for the metric and a grep for the exporter would each pass on a log where
+# they never occurred together, which is precisely the "attributed to the wrong
+# Backend" failure this is here to rule out.
+collector_metric() {
+	local backend="$1"
+	local metric="$2"
+	local exporter="$3"
+
+	awk '
+		/-> Name: /          { name = $3; next }
+		/-> exporter: Str\(/ { value = $0; sub(/.*Str\(/, "", value); sub(/\).*/, "", value); exporter = value; next }
+		# A data point`s own value starts the line; an exemplar`s is indented behind
+		# an arrow. Only the first is the number being reported.
+		/^Value: /           { if (name != "" && exporter != "") print name "|" exporter "|" $2; exporter = ""; next }
+	' "$(captured "$backend")" | grep -F "$metric|$exporter|" | tail -1 | cut -d'|' -f3
+}
+
+# rose_above polls until one of those metrics is greater than zero.
+rose_above() {
+	local backend="$1"
+	local metric="$2"
+	local exporter="$3"
+	local seconds="$4"
+	local deadline=$((SECONDS + seconds))
+	local seen
+	while [ "$SECONDS" -lt "$deadline" ]; do
+		seen="$(collector_metric "$backend" "$metric" "$exporter")"
+		if [ -n "$seen" ] && [ "${seen%%.*}" -gt 0 ] 2>/dev/null; then return 0; fi
+		sleep 3
 	done
 	return 1
 }
@@ -279,6 +360,70 @@ if [ -z "$contract_service_name" ]; then
 	exit 2
 fi
 ok "the Contract's service.name is $contract_service_name"
+
+# The SAME Contract, compiled against a Pipeline Profile that differs by one field.
+# This is the rollout the harness drives later: same service, same Gateway, a
+# different pipeline, and therefore a different config_version.
+if ! (cd "$repo_root" && "$guardrail" compile --profiles harness/rolled-out-profiles.yaml guardrail/examples/compliant-contract.yaml) >"$generated/agent-rolled-out.yaml"; then
+	echo "could not compile the Agent config for the rollout"
+	exit 2
+fi
+
+agent_version="$(stamped_version "$generated/agent.yaml")"
+gateway_version="$(stamped_version "$generated/gateway.yaml")"
+rolled_out_version="$(stamped_version "$generated/agent-rolled-out.yaml")"
+
+for named in "the Agent:$agent_version" "the Gateway:$gateway_version" "the rolled-out Agent:$rolled_out_version"; do
+	if [ -z "${named#*:}" ]; then
+		echo "${named%%:*} compiled without a config_version; there would be nothing to confirm a Rollout by"
+		exit 2
+	fi
+done
+ok "the Agent announces $agent_version"
+ok "the Gateway announces $gateway_version"
+
+# Two collectors running two different configurations must not claim the same
+# identity. If they did, an operator watching for a version fleet-wide would see
+# the Gateway's answer and read it as the Agent's.
+if [ "$agent_version" = "$gateway_version" ]; then
+	bad "the Agent and the Gateway announce the same config_version, so the version identifies neither"
+else
+	ok "the Agent and the Gateway announce different versions — each identifies its own configuration"
+fi
+
+# And the ROLLOUT changes it. A Profile is how telemetry ships, so a Profile change
+# is a new pipeline; a version that did not move here would confirm a rollout that
+# never happened.
+if [ "$rolled_out_version" = "$agent_version" ]; then
+	bad "changing the Pipeline Profile did not change the Agent's config_version ($agent_version), so a Rollout would confirm itself against the version already reported"
+else
+	ok "the changed Pipeline Profile compiles to a new config_version ($rolled_out_version)"
+fi
+
+# --------------------------------------------- the compiled files, unaltered ----
+
+say "The compiled configs start on their pinned images, with no harness overlay"
+
+# The one assertion that exercises the self-telemetry reader EXACTLY as compiled.
+# Everywhere else the harness overrides it — `readers:` is a list and confmap
+# replaces a list rather than merging into it, so the plaintext concession has to
+# restate the whole reader (insecure/agent.yaml says why). A malformed reader is a
+# start-up failure, because the SDK is built before the first pipeline byte moves,
+# so starting the compiled file unaltered is what closes that gap. It caught a real
+# one: `protocol: grpc/protobuf` passes `otelcol validate` and then refuses to run.
+if ! compose --profile ascompiled up -d agent-as-compiled gateway-as-compiled >/dev/null 2>&1; then
+	echo "could not start the compiled configs"
+	exit 2
+fi
+for service in agent-as-compiled gateway-as-compiled; do
+	if ready "$service"; then
+		ok "${service%-as-compiled} starts on its compiled config with nothing added"
+	else
+		bad "${service%-as-compiled}'s compiled config does not start on its pinned image, so what a deployment would run does not run"
+		compose --profile ascompiled logs "$service" 2>&1 | tail -20
+	fi
+done
+compose --profile ascompiled rm -sf agent-as-compiled gateway-as-compiled >/dev/null 2>&1
 
 # ------------------------------------------------------- negative control ----
 
@@ -493,6 +638,69 @@ else
 	ok "no Agent config mentions a Guardrail — the tags can only have come from the Gateway"
 fi
 
+# ------------------------------------------------ platform self-observation ----
+
+say "The platform's own telemetry arrives, and says which configuration is running"
+
+# The whole of ADR 0010 in one assertion: no status endpoint was polled, nothing
+# was asked, and the answer to "which configuration is this fleet running?" turned
+# up in a Backend beside the fleet's own telemetry.
+#
+# The expected value is READ OUT OF THE COMPILED FILE rather than written here. A
+# hard-coded string would pass while the compiler and the collector disagreed, and
+# a version that does not identify what runs is worse than no version at all.
+if arrived backend "otel.platform.config_version: Str($agent_version)" 150; then
+	ok "the Agent reports config_version=$agent_version in its own telemetry — the value the compiler predicted"
+else
+	bad "the Agent's config_version never reached the Backend, so a Rollout could not be confirmed"
+	compose logs agent 2>&1 | tail -20
+fi
+
+if arrived backend "otel.platform.config_version: Str($gateway_version)" 150; then
+	ok "the Gateway reports config_version=$gateway_version, on a route that never enters its own pipelines"
+else
+	bad "the Gateway's config_version never reached the Backend; its independent export path is not working"
+	compose logs gateway 2>&1 | tail -20
+fi
+
+# The Agent's own queue depth, arriving over a path that is not that queue. This is
+# the bootstrap dependency answered: the metric that reports on `otlp/gateway` does
+# not travel through `otlp/gateway`.
+if [ -n "$(collector_metric backend otelcol_exporter_queue_size otlp/gateway)" ]; then
+	ok "the Agent's own queue depth for otlp/gateway arrived — reported over a client that is not that exporter"
+else
+	bad "the Agent's queue-depth metric never arrived, so back-pressure at the Agent is invisible"
+fi
+
+say "Per-Backend back-pressure: one Backend stalls, and only its numbers move"
+
+# The C5 scenario, now visible in numbers rather than inferred from a span turning
+# up later. cold-archive has no container at all, so the Gateway is holding its
+# telemetry in ITS queue — and the metric saying so is labelled with ITS exporter,
+# which is named after the Backend precisely so this question is answerable.
+if rose_above backend otelcol_exporter_queue_size otlp/cold-archive 150; then
+	ok "cold-archive's own queue is holding batches ($(collector_metric backend otelcol_exporter_queue_size otlp/cold-archive)) while it is unreachable"
+else
+	bad "cold-archive is unreachable and its queue depth never rose; back-pressure is not being reported per Backend"
+	compose logs backend 2>&1 | grep -F "otlp/cold-archive" | tail -5
+fi
+
+# At the same time, and this is the half that makes the first half mean something:
+# the healthy Backend's queue is empty and its exports are succeeding. One Backend
+# stalling is one Backend's problem.
+healthy_queue="$(collector_metric backend otelcol_exporter_queue_size otlp/primary-apm)"
+if [ "$healthy_queue" = "0" ]; then
+	ok "primary-apm's queue is empty at the same moment — the stall is attributed to cold-archive and to nothing else"
+else
+	bad "primary-apm's queue depth is ${healthy_queue:-absent} while a different Backend is the one that is down"
+fi
+
+if [ -n "$(collector_metric backend otelcol_exporter_sent_spans otlp/primary-apm)" ]; then
+	ok "primary-apm kept exporting throughout, and its own counter says so"
+else
+	bad "no export counter arrived for primary-apm, so 'the others keep exporting' is not being observed"
+fi
+
 # ---------------------------------------------------- the down Backend ----
 
 say "The unreachable Backend really was unreachable"
@@ -550,6 +758,39 @@ if arrived backend-archive "$recovery_trace" 120; then
 else
 	bad "the archive received nothing after coming up; its queue dropped what it was holding, or retry gave up"
 	compose logs gateway 2>&1 | tail -20
+fi
+
+# ------------------------------------------------------------- a Rollout ----
+
+say "A Rollout, confirmed by telemetry and by nothing else"
+
+# The drill this whole slice exists for. The Pipeline Profile changed, the Agent
+# was recompiled and replaced, and the question "did it land?" is answered by the
+# new config_version turning up in a Backend — not by a status endpoint, not by a
+# heartbeat, not by asking the collector anything (ADR 0010).
+#
+# The OLD Agent is stopped first, so what reports afterwards is this service's
+# Agent on the new configuration rather than two of them mid-rollout.
+if ! compose stop agent >/dev/null 2>&1; then
+	echo "could not stop the Agent"
+	exit 2
+fi
+if ! compose --profile rollout up -d agent-rolled-out >/dev/null 2>&1; then
+	echo "could not start the rolled-out Agent"
+	exit 2
+fi
+ready agent-rolled-out || {
+	echo "the rolled-out Agent never became ready"
+	compose --profile rollout logs agent-rolled-out 2>&1 | tail -20
+	exit 2
+}
+ok "the Agent was replaced with one compiled from a changed Pipeline Profile"
+
+if arrived backend "otel.platform.config_version: Str($rolled_out_version)" 150; then
+	ok "the new config_version=$rolled_out_version is reported fleet-wide — the Rollout is confirmed, with no status channel involved"
+else
+	bad "the new config_version never appeared, so this Rollout could not be confirmed"
+	compose --profile rollout logs agent-rolled-out 2>&1 | tail -20
 fi
 
 # ------------------------------------------------------------- verdict ----

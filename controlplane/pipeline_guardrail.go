@@ -59,6 +59,17 @@ const (
 	blockingAttribute = guardrailNamespace + "blocking"
 )
 
+// clearPlatformNamespace deletes the platform's own namespace from a record.
+//
+// It is not a Guardrail verdict and it is not derived from any Standard — it is
+// the same hygiene the verdict namespace gets, applied to the other namespace the
+// Gateway must be able to trust. It rides in this processor rather than in one of
+// its own because it is the same single pass over the same records, and a second
+// transform would be a second component whose ordering relative to this one would
+// then matter.
+var clearPlatformNamespace = fmt.Sprintf(
+	"delete_matching_keys(attributes, %q)", "^"+regexp.QuoteMeta(platformNamespace))
+
 // pipelineGuardrails compiles the catalog's pipeline-enforced Standards into one
 // transform processor, and reports whether there is anything to run. A catalog
 // with no pipeline-enforced Standard compiles to no processor at all rather than
@@ -125,7 +136,7 @@ func pipelineGuardrails(catalog *guardrail.StandardCatalog) (map[string]any, boo
 }
 
 // sweptThenJudged is one Signal's statement groups: the verdict on the resource,
-// and the namespace cleared in every other context that carries attributes.
+// and the namespaces cleared in every other context that carries attributes.
 func sweptThenJudged(clear string, verdict []any, records ...string) []any {
 	groups := []any{map[string]any{
 		"context":    "resource",
@@ -135,8 +146,16 @@ func sweptThenJudged(clear string, verdict []any, records ...string) []any {
 	// record levels.
 	for _, context := range append([]string{"scope"}, records...) {
 		groups = append(groups, map[string]any{
-			"context":    context,
-			"statements": []any{clear},
+			"context": context,
+			// The verdict namespace, and — off the resource only — the namespace the
+			// PLATFORM uses to describe its own collectors. The asymmetry is the point.
+			// `otel.platform.config_version` on a resource is a collector's own stamp
+			// arriving, and clearing it here would delete the answer a Rollout is
+			// confirmed by; on a span, a datapoint, a log record or a scope it can only
+			// have been put there by a service, and most Backends flatten record and
+			// resource attributes into one queryable field, so it would answer an
+			// operator's rollout query just as well as the real thing.
+			"statements": []any{clear, clearPlatformNamespace},
 		})
 	}
 	return groups

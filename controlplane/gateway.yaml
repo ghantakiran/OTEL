@@ -77,6 +77,41 @@ gateway:
     timeout: 5s
     send_batch_size: 8192
   spill_root: /var/lib/otelcol/spill
+
+  # THE GATEWAY'S OWN PLACE IN THE TELEMETRY IT CARRIES (ADR 0010, ADR 0016).
+  #
+  # The platform observes itself, and there is no status endpoint, no heartbeat
+  # and no back-channel — deliberately, and none is to be added. What an operator
+  # watches is this: the Gateway's own OTLP, arriving in a Backend beside the
+  # fleet's, saying which configuration it is running and how its per-Backend
+  # queues are doing.
+  #
+  #   backend              Which Backend the Gateway's OWN signals go to, and they
+  #                        go there DIRECTLY — not through the Gateway's pipelines.
+  #                        That is the whole point: they report on those pipelines'
+  #                        exporters, so queueing behind one would mean the metric
+  #                        that says "this Backend has stopped answering" is held
+  #                        by the Backend that has stopped answering. The route has
+  #                        no queue, no retry and no batch, so it cannot be blocked
+  #                        by the outage it exists to report.
+  #
+  #                        It must be a Backend declared below, and one that
+  #                        receives metrics. Choose the most available one: this is
+  #                        the Backend that goes blind if it is the one that fails.
+  #   resource_attributes  Who the Gateway says it is. The Gateway is not a service
+  #                        and has no Telemetry Contract, so what a Contract would
+  #                        have declared is declared here — and it is held to the
+  #                        same Standards: a Gateway whose own telemetry violates a
+  #                        `block` Standard it tags the fleet with does not compile.
+  #                        `service.version` is the pinned collector distribution's
+  #                        (ADR 0014) and moves when that pin moves.
+  self_telemetry:
+    backend: primary-apm
+    resource_attributes:
+      service.name: otel-gateway
+      service.version: 0.127.0
+      deployment.environment: production
+      service.namespace: observability
   backends:
     - backend: primary-apm
       description: >-

@@ -140,12 +140,17 @@ So the tag says "reality violates this Standard", not "this team is in trouble".
 
 ## What C7 reads from this
 
-C7 (#15) builds the platform's self-observation on ADR 0010's decision that the platform watches its own telemetry rather than a status back-channel. Pipeline Guardrails fit that exactly, and are deliberately not extended into it here:
+C7 (#15) built the platform's self-observation on ADR 0010's decision that the platform watches its own telemetry rather than a status back-channel. Pipeline Guardrails fit that exactly, and were deliberately not extended into it here:
 
 - **The violation is in the telemetry**, not in a Gateway-only log or metric. It reaches every Backend the Signal fans out to, so it is available to whatever C7 chooses to read.
 - **`otel.guardrail.blocking` is the one field to alert on.** It is low-cardinality and stable, so a threshold on it does not have to change when a Standard is added.
 - **The Standard id is on the record**, so "which Standard, which service" is read off the data rather than inferred.
-- **Counting is C7's**, not C6's. The `count` connector is available (the Gateway already runs contrib, ADR 0014) and would turn the roll-up into a real metric labelled by Standard and Severity — counting the same tag the transform writes, so there is still one source. **#45** records it.
+- **Counting is C7's**, not C6's. The `count` connector is available (the Gateway already runs contrib, ADR 0014) and would turn the roll-up into a real metric labelled by Standard and Severity — counting the same tag the transform writes, so there is still one source. **#45** records it, and C7 did not take it: what C7 built is the platform reporting on *itself*, which is a different stream from a count of what the fleet violates.
+
+Two things C7 did add to this processor, and both are hygiene rather than enforcement:
+
+- **The Guardrail judges an Agent's own telemetry exactly as it judges that service.** An Agent's self-telemetry reaches the Gateway through the ordinary pipeline and carries the identity its Telemetry Contract declares — so a compliant service's Agent is untagged and a drifted one's is tagged. There is deliberately **no exemption**: an exemption would be a resource attribute, and a service can write one. The Gateway's own telemetry never enters a pipeline and is therefore never tagged; instead the Gateway must satisfy every `block` pipeline Standard *at compile time* or it does not compile (ADR 0016).
+- **`otel.platform.` is swept from every context except the resource.** That namespace is what a collector says about itself, and `otel.platform.config_version` is the single field a Rollout is confirmed by. On a resource it is a collector's legitimate stamp arriving, so it is left alone; on a span, a datapoint, a log record or a scope it can only be a service trying to answer that question for itself.
 
 ## What runs in the Gateway
 
@@ -179,7 +184,7 @@ Notes on the shape, each load-bearing:
 
 The processors are emitted for the Gateway and for nothing else. Agents do no enforcement (ADR 0007). Beyond that being the declared topology, a Standard enforced in a thousand Agents is a Standard with a thousand places to be out of date — and the Gateway is the only place that sees the whole fleet.
 
-Both reference Agent compiles are byte-identical to before Pipeline Guardrails existed, and a test asserts an Agent's compiled config never mentions `otel.guardrail`.
+No Agent's compiled config gained anything from Pipeline Guardrails — both reference Agent compiles were byte-identical to before C6 existed — and a test asserts an Agent's compiled config never mentions `otel.guardrail`. What an Agent *did* gain later, in C7, is its own `service.telemetry` block and a `delete` action stripping the platform's own namespace: self-observation, not enforcement. ADR 0016 has the diff and the reason.
 
 ## Authoring one
 
