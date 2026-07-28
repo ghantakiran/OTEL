@@ -18,6 +18,14 @@ _Avoid_: Autonomy level, permission tier
 The Copilot's current position on the Autonomy Ladder — Advisor, Gated, or Bounded Autonomy — which fixes what actions it may take.
 _Avoid_: Mode, level, state
 
+**Typed Tool**:
+One of the vendor-neutral tools the Copilot is given, and the only way it can learn anything (`query_traces`, and later `query_metrics` / `query_logs` / `get_contract` / `get_standards`). Its parameters are typed fields, never free text, so no Backend's query language can cross into a prompt — swapping a Backend changes one adapter and leaves every prompt untouched (ADR 0007, ADR 0011). What a Typed Tool returns is a Trace Reference and its kin, never prose.
+_Avoid_: Function, API, endpoint, capability, skill
+
+**Trace Reference**:
+A citable handle on one trace — its ID, the identity its Telemetry Contract stamped, what the root span was, and the Config Version of the collector carrying it. It is a reference and not a summary, which is what makes Grounding checkable: a claim points at a handle an operator can follow rather than at prose about telemetry the Copilot saw once. The Config Version is *joined* from Self-Telemetry rather than read off the span, because the Agent strips the `otel.platform.` namespace from everything it forwards.
+_Avoid_: Trace, span, evidence blob, result, record
+
 **Grounding**:
 The requirement that every claim the Copilot makes cites the specific telemetry evidence behind it (a trace, metric query, or log query); an ungrounded hypothesis is suppressed or flagged low-confidence.
 _Avoid_: Citation, sourcing, attribution
