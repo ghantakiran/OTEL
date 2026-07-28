@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -29,6 +30,16 @@ import (
 // would require writing a conversion that is not there. That is the strongest
 // claim available at this layer, and it is a claim about structure — #54 records
 // that it has never been tested against an adversary, which is a different thing.
+//
+// THE INVARIANT, STATED PRECISELY, because a loose version of it is unkeepable:
+//
+//	Telemetry never enters the prompt as PLATFORM-AUTHORED INSTRUCTIONS. Evidence
+//	appears only as tool results, and in assistant turns quoting it.
+//
+// The second clause is not a concession. A grounded summary is REQUIRED to quote
+// the evidence it cites (ADR 0009), so a span name in an assistant turn is the
+// Copilot working. Only the system prompt and the user turns are ours to keep
+// clean, and PlatformAuthoredText is exactly that surface.
 
 // Role is who a turn is from.
 type Role string
@@ -132,18 +143,47 @@ func (c *Conversation) AppendToolResult(r ToolResult) {
 	c.turns = append(c.turns, Turn{Role: RoleToolResult, Result: &r})
 }
 
-// AuthoredText returns every string this platform or the model wrote: the system
-// prompt and the text of every non-tool-result turn.
+// PlatformAuthoredText returns everything THIS PLATFORM wrote and sent as
+// instructions: the system prompt and every user turn. Nothing else.
 //
-// It exists so that "no telemetry reached a prompt" is a checkable claim rather
-// than an assurance. A test walks this and asserts no evidence string appears in
-// it; anything that started rendering evidence into a Text field would fail there.
+// This is the surface ADR 0011 is about, and the distinction is load-bearing:
+//
+//	system + user    what we tell the model to do. Telemetry here would be
+//	                 telemetry acting as INSTRUCTION, which is the whole failure
+//	                 mode. Nothing telemetry-derived may ever appear.
+//	assistant        what the model says back. A grounded summary MUST quote the
+//	                 evidence it cites (ADR 0009) — a span name appearing here is
+//	                 the Copilot working, not failing.
+//	tool_result      where evidence belongs by design.
+//
+// An earlier version of this check scanned assistant turns too. It passed only
+// because the test double never quoted its evidence; against a real model it
+// would have gone red for correct behaviour, and a security check that fails on
+// correct behaviour is one that gets loosened under deadline pressure. Splitting
+// it is what keeps the assertion honest and keepable.
+func (c *Conversation) PlatformAuthoredText() []string {
+	out := []string{c.system}
+	for _, t := range c.turns {
+		if t.Role == RoleUser {
+			out = append(out, t.Text)
+		}
+	}
+	return out
+}
+
+// AuthoredText returns every string that is not tool-result content: the system
+// prompt, every user turn, and every assistant turn.
+//
+// It is NOT the ADR 0011 surface — see PlatformAuthoredText for that. This is for
+// callers that need the whole readable exchange: a transcript for an operator, an
+// Eval Harness replay (#20), an audit record. Assistant text in here legitimately
+// quotes telemetry.
 func (c *Conversation) AuthoredText() []string {
 	out := []string{c.system}
 	for _, t := range c.turns {
 		if t.Role == RoleToolResult {
 			// Deliberately skipped: this turn is where telemetry is SUPPOSED to
-			// be. Including it would make the check vacuous.
+			// be, and including it would make any scan over this vacuous.
 			continue
 		}
 		out = append(out, t.Text)
@@ -301,7 +341,11 @@ func Run(ctx context.Context, m Model, store TraceStore, question string) (*Conv
 // the model outside of Evidence.
 func invoke(ctx context.Context, store TraceStore, call ToolUse) ToolResult {
 	if call.Name != QueryTracesTool {
-		return ToolResult{ToolUseID: call.ID, Err: "no such tool: " + call.Name}
+		// The name is echoed because a model that asked for the wrong tool needs
+		// to know which one — but it is MODEL-AUTHORED text going back into a
+		// message the model then reads, so it is bounded rather than trusted.
+		// Unbounded, it is a channel a model could write anything into.
+		return ToolResult{ToolUseID: call.ID, Err: "no such tool: " + boundedToolName(call.Name)}
 	}
 
 	var in queryTracesInput
@@ -352,3 +396,34 @@ func parseRFC3339(s string) (time.Time, error) {
 }
 
 var errBadTimestamp = errors.New("copilot: not an RFC3339 timestamp")
+
+// maxToolNameEcho is how much of an unknown tool name is quoted back. Real tool
+// names are short; anything longer is not a typo.
+const maxToolNameEcho = 64
+
+// boundedToolName makes a model-authored tool name safe to put back in front of
+// the model: every character outside the set a real tool name uses becomes a dot,
+// and the whole thing is truncated.
+//
+// Both halves matter. Truncation bounds the volume; the charset bounds the
+// content — newlines and punctuation are what would let an echoed name imitate
+// the framing of a message rather than sit inside one.
+func boundedToolName(name string) string {
+	if len(name) > maxToolNameEcho {
+		name = name[:maxToolNameEcho] + "…"
+	}
+	var b strings.Builder
+	for _, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9',
+			r == '_', r == '-', r == '.', r == '…':
+			b.WriteRune(r)
+		default:
+			b.WriteRune('.')
+		}
+	}
+	if b.Len() == 0 {
+		return "(unnamed)"
+	}
+	return b.String()
+}
