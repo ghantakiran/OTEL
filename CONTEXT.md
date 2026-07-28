@@ -88,6 +88,10 @@ _Avoid_: Collector image, otelcol build, collector version, flavour
 The check that every compiled collector configuration is accepted *and started* by its Collector Distribution, run on every pull request. Two steps, because they catch different things: `otelcol validate` resolves the configuration against the distribution's components, and starting it catches what resolution cannot — a self-telemetry reader that validates and then refuses to start is the case that motivated the second step. Distinct from the internal-coherence check `Compile` already does, which runs without a collector and cannot know what one accepts.
 _Avoid_: Config validation, lint, smoke test, CI check
 
+**Backend Rendering Check**:
+The check that a real Backend can *render* the platform's Self-Telemetry as a query, rather than merely receive it. Distinct from the Distribution Check, which asks whether a Collector Distribution accepts a compiled configuration: this asks whether the Backend at the far end can still answer "which Config Version is this collector running?" and "which Backend is backing up?" once it has ingested the answer. It is where a Backend's own naming rules — a metric renamed on ingest, a resource attribute filed somewhere ungroupable — become checked facts instead of assumptions (docs/backend-label-mapping.md). Run locally against pinned real Backends, not in CI.
+_Avoid_: Backend test, integration test, e2e check, query test
+
 **Self-Telemetry**:
 The OTEL an Agent or the Gateway emits about *itself* — its Config Version, its queue depths, its export failures and its drops — as opposed to the fleet's telemetry it is carrying. It leaves by its own OTLP client with no queue, no retry and no batching, deliberately not through the pipeline it reports on, because the outage it exists to describe is exactly what would hold it up (ADR 0010, ADR 0016). It is why there is no health API, no heartbeat and no status back-channel on this platform, and none is to be built.
 _Avoid_: Health check, heartbeat, metrics endpoint, internal metrics, status

@@ -55,15 +55,29 @@ carries the version, so pick a metric every collector always emits:
 
 ```promql
 # every collector currently reporting, and which configuration it is running
-count by (service_name, otel_platform_config_version) (otelcol_process_uptime)
+count by (service_name, otel_platform_config_version) (otelcol_process_uptime_seconds_total)
 ```
 
 ```promql
 # the services NOT yet on the version this Rollout compiled for them
 count by (service_name) (
-  otelcol_process_uptime{otel_platform_config_version != "sha256:df1d11f6…"}
+  otelcol_process_uptime_seconds_total{otel_platform_config_version != "sha256:df1d11f6…"}
 )
 ```
+
+**Two things about those queries are the Backend's doing, not the platform's**, and
+both were assumed here until a real one was put behind the Gateway (#50):
+
+- The metric is `otelcol_process_uptime_seconds_total`, not `otelcol_process_uptime`.
+  Prometheus appends the unit and `_total` on OTLP ingest. The un-suffixed name
+  returns **empty**, which reads exactly like a fleet that has not rolled out.
+- `otel_platform_config_version` is on the series only because the Backend was told
+  to put it there. By default Prometheus files resource attributes on a separate
+  `target_info` metric and these queries find nothing. Promote it, or join through
+  `target_info` — a Backend that does neither cannot confirm a Rollout at all.
+
+Both rules, the measured evidence, and the portable `target_info` join are in
+[backend-label-mapping.md](./backend-label-mapping.md).
 
 The Rollout is confirmed when, for every service in the Manifest, the version
 reported equals the version recorded — and the Gateway reports its own. Nothing was
@@ -123,8 +137,16 @@ max by (exporter) (
 
 ```promql
 # telemetry actually lost, per Backend — the alert worth paging on
-sum by (exporter) (rate(otelcol_exporter_enqueue_failed_spans[5m])) > 0
+sum by (exporter) (rate(otelcol_exporter_enqueue_failed_spans_total[5m])) > 0
 ```
+
+The two queue metrics are gauges and keep their names; the failure counters are
+sums and gain `_total`, like every counter above. The `exporter` label and the
+declared `queue_capacity` were both measured surviving into a real Backend
+unchanged — see [backend-label-mapping.md](./backend-label-mapping.md) rules 4
+and 5. `otelcol_exporter_enqueue_failed_*` is the exception: nothing here has ever
+driven a queue to capacity, so that counter has still never been seen non-zero
+(#49).
 
 An Agent's numbers use the same metrics with `exporter="otlp/gateway"`, filed under
 the service's own `service.name` — so "why is this service's telemetry thin?" is
@@ -235,3 +257,16 @@ Backend, a Pipeline Profile changed and the new version appearing after the Agen
 replaced, and one Backend's queue filling while another's stays empty. What it does
 and does not prove is in
 [agent-gateway-topology.md](./agent-gateway-topology.md#what-the-harness-proves-and-what-it-does-not).
+
+Every Backend in that run is a collector with a `debug` exporter, so what it shows
+is telemetry crossing a wire and being printed. **Whether a Backend can render any
+of it as a query** is a different claim, and it has its own run:
+
+```
+bash harness/verify-backend-rendering.sh
+```
+
+That stands a real metrics Backend and a real trace store behind the same
+unmodified compiled configs and asks for the platform's own telemetry back, in the
+form the queries on this page use. It is where the two corrections above came from.
+See [backend-label-mapping.md](./backend-label-mapping.md).

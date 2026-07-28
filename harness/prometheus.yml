@@ -1,0 +1,44 @@
+# Prometheus, filling the metrics half of the `primary-apm` and `metrics-store`
+# roles for a harness run. HAND-WRITTEN, like the Backend stand-in it sits behind.
+#
+# It scrapes NOTHING. Everything it holds arrived by OTLP, pushed the way the
+# platform pushes it: the Gateway's own telemetry straight to `primary-apm`, and
+# the Agents' own telemetry through the Gateway's metrics pipeline. That is the
+# route docs/platform-self-observation.md describes, and querying anything that got
+# here another way would prove nothing about it.
+#
+# THE ONE LINE THAT MATTERS IS `promote_resource_attributes`.
+#
+# By default Prometheus does not put OTLP resource attributes on the series at all.
+# It writes them once to a synthetic `target_info` metric and leaves every real
+# series carrying only `job` and `instance`. So the operator query this repository
+# had written down —
+#
+#     count by (service_name, otel_platform_config_version) (otelcol_process_uptime)
+#
+# — returns EMPTY against a default Prometheus, not because the platform failed to
+# report its config_version but because the Backend filed it somewhere else. That
+# was assumed to work and had never been run (#50). It is now a checked fact, and
+# docs/backend-label-mapping.md records both the finding and the fix.
+#
+# Promoting is the fix, and it is a per-Backend decision rather than a platform one:
+# a different product will have a different mechanism or none. What the platform
+# guarantees is that the attribute is ON THE RESOURCE. How a Backend surfaces it is
+# the Backend's business, which is exactly why this line lives in harness/ and not
+# in anything compiled.
+otlp:
+  promote_resource_attributes:
+    - service.name
+    - service.namespace
+    - service.version
+    - deployment.environment
+    - otel.platform.config_version
+
+# Nothing is scraped, and saying so explicitly is not the same as leaving it out —
+# an absent key would read as "not thought about" in a file whose whole point is
+# that every route into this Backend is the platform's own OTLP push.
+#
+# Retention is NOT set here. Prometheus takes it as a command-line flag only
+# (`--storage.tsdb.retention.time`), and a `storage.tsdb.retention` block in this
+# file is refused at start-up rather than ignored — see real-backends.yaml.
+scrape_configs: []

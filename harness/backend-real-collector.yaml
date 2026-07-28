@@ -1,0 +1,67 @@
+# THE ADAPTER SEAM. The `primary-apm` Backend stand-in, wired to real products
+# instead of to `debug`.
+#
+# This is the ONLY file in the repository that knows a vendor's ingest shape, and
+# that is deliberate. controlplane/gateway.yaml names a ROLE — `primary-apm` — and
+# the compiled Gateway exports OTLP to whatever answers at that role's endpoint. So
+# a real Backend can be put behind the role without touching a single compiled
+# artefact: the Gateway still speaks OTLP/gRPC to `apm-otlp...:4317`, and what
+# happens after that is this file's business (ADR 0007).
+#
+# What the platform sends is unchanged. What is new is that something on the far
+# end can be QUERIED rather than grepped, which is the whole of #50: every C7
+# assertion until now was made against `debug` output — printed text proving
+# telemetry crossed a wire, and nothing about whether a Backend can render
+# `otel.platform.config_version` or keep the `exporter` label intact.
+#
+# WHY THIS STAND-IN AND NOT PROMETHEUS DIRECTLY. Prometheus ingests OTLP only over
+# HTTP, at its own path (`/api/v1/otlp/v1/metrics`), and Tempo is a separate
+# process again. The compiled Gateway exports OTLP/gRPC to one endpoint per
+# Backend, as it should. Rather than bend the compiled artefact to a product's
+# ingest shape — which would be the exact coupling ADR 0007 exists to prevent —
+# the stand-in stays where it was and translates. It is a Backend's front door,
+# which is what a real APM's OTLP endpoint is too.
+#
+# `debug` is KEPT alongside. run.sh asserts against this container's log, and #50
+# is not a licence to break C7's existing proof: the same records go to the log and
+# to the products, so both sets of assertions read the same traffic.
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      # The platform's OWN telemetry arrives here rather than on gRPC — the pinned
+      # collector's periodic gRPC metric reader has no plaintext mode and this
+      # bridge has no certificates. Same concession as the plain stand-in; see
+      # insecure/gateway.yaml.
+      http:
+        endpoint: 0.0.0.0:4318
+
+exporters:
+  debug:
+    verbosity: detailed
+
+  # Metrics to Prometheus. `otlphttp` appends `/v1/metrics` to this endpoint, which
+  # is why the path stops at `/api/v1/otlp`.
+  otlphttp/prometheus:
+    endpoint: http://prometheus:9090/api/v1/otlp
+    tls:
+      insecure: true
+
+  # Traces to Tempo, OTLP/gRPC, which Tempo speaks natively — no translation.
+  otlp/tempo:
+    endpoint: tempo:4317
+    tls:
+      insecure: true
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      exporters: [debug, otlp/tempo]
+    metrics:
+      receivers: [otlp]
+      exporters: [debug, otlphttp/prometheus]
+    logs:
+      receivers: [otlp]
+      exporters: [debug]

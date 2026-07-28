@@ -1,0 +1,75 @@
+# THE REAL-BACKEND OVERRIDE. Layered on top of docker-compose.yaml, never instead
+# of it:
+#
+#   docker compose -f harness/docker-compose.yaml -f harness/real-backends.yaml ...
+#
+# An override rather than a second topology, because the topology is not what is
+# under test here. C7 already proved the platform reports on itself; #50 is about
+# whether a Backend that is a real product can RENDER what it reported. So every
+# Agent, the Gateway, and both compiled configs stay exactly as docker-compose.yaml
+# defines them, and the only thing that changes is what stands at the far end of
+# one Backend's OTLP endpoint.
+#
+# ONLY `primary-apm` IS REPLACED, and that is enough:
+#
+#   - the GATEWAY's own telemetry goes there DIRECTLY, because
+#     controlplane/gateway.yaml says `self_telemetry.backend: primary-apm`. That is
+#     where `otel.platform.config_version` and every `otelcol_exporter_*` counter
+#     for every Backend arrives.
+#   - the AGENTS' own telemetry reaches it too, through the Gateway's ordinary
+#     metrics pipeline, which fans out to primary-apm like any other metric.
+#
+# So one real Backend sees both halves of what C7 claims. Pointing `metrics-store`
+# at the same Prometheus as well would not add a fact — it would send the Agents'
+# identical series a second time, from a second writer, and Prometheus would refuse
+# the duplicate samples. `backend-metrics` therefore stays a `debug` stand-in, and
+# what it proves stays what it proved: that a Backend declaring `signals: [metrics]`
+# receives metrics and no spans.
+#
+# `backend-archive` is untouched and still never started, so the Gateway still
+# holds one genuinely unreachable Backend — which is what makes the per-Backend
+# queue metric move at all, and therefore what makes it worth querying.
+services:
+  # The primary APM stand-in, now translating instead of only printing. Same image,
+  # same alias, same OTLP front door — a different config file behind it.
+  backend:
+    volumes:
+      - ./backend-real-collector.yaml:/etc/otelcol/backend.yaml:ro
+    depends_on: [prometheus, tempo]
+
+  prometheus:
+    image: ${PROMETHEUS_IMAGE}
+    command:
+      # OTLP ingest is off by default. Without this Prometheus has no way to
+      # receive anything this platform sends.
+      - --web.enable-otlp-receiver
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      # Retention is a FLAG, not a config-file key. A `storage.tsdb.retention`
+      # block in prometheus.yml is refused at start-up, not ignored.
+      - --storage.tsdb.retention.time=1h
+      # Queried from the host by verify-backend-rendering.sh.
+      - --web.listen-address=0.0.0.0:9090
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"
+    networks:
+      - otel
+
+  tempo:
+    image: ${TEMPO_IMAGE}
+    command:
+      - -config.file=/etc/tempo/tempo.yaml
+    volumes:
+      - ./tempo.yaml:/etc/tempo/tempo.yaml:ro
+    # Tempo's image runs as an unprivileged user (uid 10001) and creates its own
+    # block and WAL directories under this path at start-up. A default tmpfs mount
+    # is root-owned and mode 0755, so that mkdir fails and Tempo exits — mode 1777
+    # is what lets it create them. Nothing here needs to outlive the run.
+    tmpfs:
+      - /var/tempo:mode=1777
+    ports:
+      - "3200:3200"
+    networks:
+      - otel

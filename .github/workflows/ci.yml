@@ -39,6 +39,14 @@ jobs:
       # pulls no images and starts no containers, so it belongs here rather than in
       # the job below that does both.
       - run: bash .github/scripts/validate-compiled-configs_test.sh
+      # The Backend Rendering Check's judgement about what came back from a
+      # Backend. The check itself needs Prometheus, Tempo, a Gateway and an Agent
+      # and waits out a compiled 30s self-telemetry interval, so it stays a local
+      # run (harness/verify-backend-rendering.sh) like harness/run.sh — but the
+      # part that decides whether an empty result set is a pass is exactly the part
+      # that must not be got wrong, and it stubs cleanly. Stubs `docker`, `curl`
+      # and `go`; makes no network call.
+      - run: bash harness/verify-backend-rendering_test.sh
 
   distribution-check:
     name: A real collector accepts and starts every compiled configuration
