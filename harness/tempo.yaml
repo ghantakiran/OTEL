@@ -1,0 +1,42 @@
+# Tempo, filling the trace half of the `primary-apm` role for a harness run.
+#
+# It exists for P1 (#16) rather than for C7. The two facts #50 is about —
+# `otel.platform.config_version` as a queryable label, and per-Backend queue
+# metrics attributable by exporter — are both METRICS facts, and Prometheus alone
+# settles them. What Tempo settles is the other half of the P1 dependency: that a
+# span the platform carried is retrievable from a real trace store by the identity
+# a Telemetry Contract stamped on it, which is what `query_traces` will do.
+#
+# Single-binary, local storage, no compaction worth the name. The harness runs for
+# minutes and throws it away.
+server:
+  http_listen_port: 3200
+
+distributor:
+  receivers:
+    otlp:
+      protocols:
+        grpc:
+          endpoint: 0.0.0.0:4317
+        http:
+          endpoint: 0.0.0.0:4318
+
+ingester:
+  # A trace is queryable only after the ingester cuts it, so the harness would
+  # otherwise wait the default (5s idle / 30s live) before anything could be found.
+  # Shortened because the harness asserts within one run, not because a deployment
+  # would want this.
+  trace_idle_period: 1s
+  max_block_duration: 5s
+
+compactor:
+  compaction:
+    block_retention: 1h
+
+storage:
+  trace:
+    backend: local
+    local:
+      path: /var/tempo/blocks
+    wal:
+      path: /var/tempo/wal
