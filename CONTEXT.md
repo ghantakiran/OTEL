@@ -80,6 +80,14 @@ _Avoid_: Independence, decoupling, per-backend config
 Keeping a Backend's sending queue on disk rather than in memory, so telemetry queued for a Backend that is not answering survives the Gateway restarting. Declared per Backend; each Spilling Backend writes to its own directory under the Gateway's one spill root. It is the single reason the Gateway runs the collector's contrib distribution rather than core (ADR 0014).
 _Avoid_: Disk buffer, persistence, dead-letter queue, overflow
 
+**Collector Distribution**:
+Which build of the OpenTelemetry Collector a compiled configuration is meant to run on — **core** or **contrib**. They accept different component sets, so it is a property of the configuration and not a deployment detail: an Agent Compiles for core, and the Gateway for contrib because Spill and the Pipeline Guardrail need components core does not have (ADR 0014). Pinned to one version for both, in one file, so the harness and the Distribution Check cannot answer the same question differently.
+_Avoid_: Collector image, otelcol build, collector version, flavour
+
+**Distribution Check**:
+The check that every compiled collector configuration is accepted *and started* by its Collector Distribution, run on every pull request. Two steps, because they catch different things: `otelcol validate` resolves the configuration against the distribution's components, and starting it catches what resolution cannot — a self-telemetry reader that validates and then refuses to start is the case that motivated the second step. Distinct from the internal-coherence check `Compile` already does, which runs without a collector and cannot know what one accepts.
+_Avoid_: Config validation, lint, smoke test, CI check
+
 **Self-Telemetry**:
 The OTEL an Agent or the Gateway emits about *itself* — its Config Version, its queue depths, its export failures and its drops — as opposed to the fleet's telemetry it is carrying. It leaves by its own OTLP client with no queue, no retry and no batching, deliberately not through the pipeline it reports on, because the outage it exists to describe is exactly what would hold it up (ADR 0010, ADR 0016). It is why there is no health API, no heartbeat and no status back-channel on this platform, and none is to be built.
 _Avoid_: Health check, heartbeat, metrics endpoint, internal metrics, status

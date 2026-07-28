@@ -97,7 +97,9 @@ A tier that exists in the taxonomy but has no Profile — the state a tier is in
 
 A compiled config is checked for **referential integrity**: every component a pipeline names is defined, and every defined component is used by some pipeline. Dangling references are what this class of generator actually gets wrong, and an unused component means a Profile setting silently did nothing.
 
-This is *not* the same as proving a given `otelcol` build would accept the file — that needs the collector binary in CI, which is a follow-up. The CLI test does assert the output parses as collector-shaped YAML with every pipeline wired end to end.
+This is *not* the same as proving a given `otelcol` build would accept the file. That needs the collector binary, and it now runs: the **Distribution Check** loads and starts every compiled configuration on the Collector Distribution it is compiled for, on every pull request. See [`docs/collector-distribution-check.md`](collector-distribution-check.md).
+
+The two are not redundant. `Validate()` runs inside `go test` on a value that has not been rendered yet, and catches the dangling-reference class in milliseconds; the Distribution Check runs a container per file and catches the class `Validate()` cannot see — a component the distribution does not have, a setting it does not recognise. Neither subsumes the other.
 
 ## For the Control Plane
 

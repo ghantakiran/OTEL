@@ -34,6 +34,36 @@ jobs:
       # The worked examples in docs/ are executable promises. Three of four had
       # gone stale before anyone noticed, because prose has no test.
       - run: bash .github/scripts/docs-examples_test.sh
+      # The Distribution Check's own branching — which distribution a file goes to,
+      # and whether a run that checked nothing reads as a pass. Stubs `docker`;
+      # pulls no images and starts no containers, so it belongs here rather than in
+      # the job below that does both.
+      - run: bash .github/scripts/validate-compiled-configs_test.sh
+
+  distribution-check:
+    name: A real collector accepts and starts every compiled configuration
+    # The only job in this workflow that runs the artefact rather than reasoning
+    # about it. `CollectorConfig.Validate()` checks referential integrity and cannot
+    # know what a distribution accepts — an unknown processor, a setting a built-in
+    # component does not have, a type mismatch inside a component's own config block
+    # are all internally coherent and all refused by the binary that has to run the
+    # file. Until this job existed, everything under fleet/compiled/ was YAML no
+    # collector had ever parsed (#34).
+    runs-on: ubuntu-latest
+    steps:
+      # No history needed: nothing here dates a service from git.
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      # The Gateway's collector configuration is compiled on demand rather than
+      # committed, so the CLI is needed to have something to check.
+      - run: go build -o "$RUNNER_TEMP/otel-guardrail" ./guardrail/cmd/otel-guardrail
+
+      - name: Every compiled configuration loads and starts on its own distribution
+        env:
+          GUARDRAIL: ${{ runner.temp }}/otel-guardrail
+        run: bash .github/scripts/validate-compiled-configs.sh
 
   fleet-up-to-date:
     name: The committed collector configuration is what the Contracts compile to
