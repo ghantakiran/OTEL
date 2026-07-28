@@ -32,6 +32,13 @@
 #             core-only, and the harness keeps proving the compiled Agent config
 #             runs on a core build. Same pin, so nothing else differs.
 #
+# Neither version is written here. Both come from collector-images.env, which the
+# Distribution Check reads too (.github/scripts/validate-compiled-configs.sh): the
+# harness proving a config runs on one version while CI checked it against another
+# would be two answers to one question, and the wrong one would be the one nobody
+# ran. `docker compose` needs `--env-file harness/collector-images.env` — run.sh
+# passes it, and so does the teardown line run.sh prints.
+#
 # Two more things here are hand-written, deliberately:
 #
 #   backend-collector.yaml   The Backend stand-in, shared by all three. A real
@@ -57,7 +64,7 @@ services:
   # The Gateway: one shared collector, receiving from every Agent, fanning out to
   # every Backend. Its config is compiled from controlplane/gateway.yaml.
   gateway:
-    image: otel/opentelemetry-collector-contrib:0.127.0
+    image: ${COLLECTOR_CONTRIB_IMAGE}
     command:
       - --config=/etc/otelcol/compiled.yaml
       - --config=/etc/otelcol/insecure.yaml
@@ -80,7 +87,7 @@ services:
   # The Agent: one per service, running beside it. Its config is compiled from a
   # Telemetry Contract and its Service Tier's Pipeline Profile.
   agent:
-    image: otel/opentelemetry-collector:0.127.0
+    image: ${COLLECTOR_CORE_IMAGE}
     command:
       - --config=/etc/otelcol/compiled.yaml
       - --config=/etc/otelcol/insecure.yaml
@@ -99,7 +106,7 @@ services:
   # It is an Agent and not a shortcut to the Gateway on purpose: the Pipeline
   # Guardrail has to catch telemetry arriving the way telemetry actually arrives.
   agent-drifted:
-    image: otel/opentelemetry-collector:0.127.0
+    image: ${COLLECTOR_CORE_IMAGE}
     command:
       - --config=/etc/otelcol/compiled.yaml
       - --config=/etc/otelcol/insecure.yaml
@@ -118,7 +125,7 @@ services:
   # afterwards is one Agent for this service, on the new configuration — which is
   # what a rollout leaves behind, and the only way this platform confirms one.
   agent-rolled-out:
-    image: otel/opentelemetry-collector:0.127.0
+    image: ${COLLECTOR_CORE_IMAGE}
     profiles: [rollout]
     command:
       - --config=/etc/otelcol/compiled.yaml
@@ -147,7 +154,7 @@ services:
   # Profile-gated, so `up` never brings them, and run.sh removes them before the
   # negative control. Neither carries a network alias, so nothing routes to them.
   agent-as-compiled:
-    image: otel/opentelemetry-collector:0.127.0
+    image: ${COLLECTOR_CORE_IMAGE}
     profiles: [ascompiled]
     command:
       - --config=/etc/otelcol/compiled.yaml
@@ -157,7 +164,7 @@ services:
       - otel
 
   gateway-as-compiled:
-    image: otel/opentelemetry-collector-contrib:0.127.0
+    image: ${COLLECTOR_CONTRIB_IMAGE}
     profiles: [ascompiled]
     command:
       - --config=/etc/otelcol/compiled.yaml
@@ -171,7 +178,7 @@ services:
   # Backend stand-in 1 of 3: the primary APM. Takes every Signal, and is the
   # healthy Backend the fan-out assertions are made against.
   backend:
-    image: otel/opentelemetry-collector:0.127.0
+    image: ${COLLECTOR_CORE_IMAGE}
     command:
       - --config=/etc/otelcol/backend.yaml
     volumes:
@@ -185,7 +192,7 @@ services:
   # `signals: [metrics]`, so the traces pipeline must not export to it — this
   # container being up and silent while traces flow is what proves that.
   backend-metrics:
-    image: otel/opentelemetry-collector:0.127.0
+    image: ${COLLECTOR_CORE_IMAGE}
     command:
       - --config=/etc/otelcol/backend.yaml
     volumes:
@@ -200,7 +207,7 @@ services:
   # Gateway's exporter for it cannot even resolve DNS. An unreachable Backend, not
   # a simulated one.
   backend-archive:
-    image: otel/opentelemetry-collector:0.127.0
+    image: ${COLLECTOR_CORE_IMAGE}
     profiles: [recover]
     command:
       - --config=/etc/otelcol/backend.yaml

@@ -73,7 +73,14 @@ generated="$here/generated"
 keep=false
 [ "${1:-}" = "--keep" ] && keep=true
 
-compose() { docker compose --project-directory "$here" -f "$here/docker-compose.yaml" "$@"; }
+# --env-file is not optional: the collector images in docker-compose.yaml are named
+# by collector-images.env and nowhere else, so that the Distribution Check in CI and
+# this harness cannot drift onto different versions of the same question (ADR 0014).
+compose() {
+	docker compose --project-directory "$here" \
+		--env-file "$here/collector-images.env" \
+		-f "$here/docker-compose.yaml" "$@"
+}
 
 # `docker compose down` leaves containers belonging to a profile alone, so a bare
 # down would leave the archive Backend from a previous run standing — and the run
@@ -91,7 +98,7 @@ bad() {
 failed=0
 cleanup() {
 	if [ "$keep" = true ]; then
-		printf '\nContainers left running. Tear them down with:\n  docker compose --project-directory %s -f %s --profile emit --profile recover --profile ascompiled --profile rollout down -v\n' "$here" "$here/docker-compose.yaml"
+		printf '\nContainers left running. Tear them down with:\n  docker compose --project-directory %s --env-file %s -f %s --profile emit --profile recover --profile ascompiled --profile rollout down -v\n' "$here" "$here/collector-images.env" "$here/docker-compose.yaml"
 		return
 	fi
 	say "Tearing down"
