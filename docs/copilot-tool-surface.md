@@ -55,14 +55,19 @@ other directions.
 
 ```
 copilot/            the typed tool surface. Knows what a question is.
-                    Names no product, no query language, no Backend.
-copilot/backend/    the adapters. Knows TraceQL, PromQL, URL paths, label
-                    spellings, JSON bodies.
+                    Names no product, no query language, no model API.
+copilot/backend/    the Backend adapter. Knows TraceQL, PromQL, URL paths,
+                    label spellings, JSON bodies.
+copilot/claude/     the model adapter. Knows the Messages API's message shape,
+                    block types, and tool schema. The only package that imports
+                    a vendor SDK.
 ```
 
-The import direction is the proof: `backend` imports `copilot`, and `copilot`
-does not import `backend`. A query language cannot reach the tool schema or the
-prompt above it, because the package that knows one is downstream of both.
+There are **two** adapters and one seam apiece — a Backend seam and a model seam.
+Both import `copilot`; `copilot` imports neither, and imports nothing outside the
+standard library. The import direction is the proof: no query language and no
+model API can reach the tool schema or the prompt above it, because the packages
+that know them are downstream of both.
 
 Every label spelling in the adapter is a **measured** fact from
 [backend-label-mapping.md](./backend-label-mapping.md), not a guess:
@@ -98,6 +103,56 @@ constant, not `err.Error()`.
 `Conversation.AuthoredText()` exists so this is checkable rather than asserted:
 it returns every string the platform or the model wrote, and the tests walk it
 looking for a hostile span name.
+
+### At the wire: a `tool_result` travels in a user message
+
+This is the fact the serializer had to be built around, and it is not obvious
+from the invariant as stated. **There is no tool-result role in the Messages
+API.** A `tool_result` block travels inside a `role: "user"` message, so the
+moment a conversation is serialized, telemetry is sitting in a user turn — the
+exact surface ADR 0011 is about.
+
+That is not a violation, and the check has to be one level finer than the role:
+
+```
+role: user   + text block          ← ours. Must never carry telemetry.
+role: user   + tool_result block   ← evidence. This is where it belongs.
+role: assistant + text block       ← the model, quoting what it cites (ADR 0009).
+```
+
+"No telemetry in a user message" would have been the natural check and it would
+have been **wrong** — it fails on correct behaviour, which is how a security
+check gets loosened until it guards nothing. The same mistake, one layer up, is
+what `PlatformAuthoredText()` exists to avoid.
+
+What keeps the finer check possible is structural rather than careful: **a user
+message the serializer emits holds either authored text blocks or `tool_result`
+blocks, never both.** Nothing merges them, so a block's type still tells you who
+wrote its contents. A test asserts that separation directly.
+
+### Rendering evidence: the one `TraceRef` → string
+
+`copilot/claude/serialize.go` holds the **only** function in the repository that
+turns a `TraceRef` into a string. It is unexported, so there cannot be another
+outside that file, and its only caller is the code that builds a `tool_result`
+block. Until this slice, no such conversion existed anywhere — that absence was
+what made the claim structural rather than conventional, so writing it is the
+moment the claim stops being free.
+
+Evidence is rendered as a **JSON record set**, not prose:
+
+```json
+[{"trace_id":"fe3852be…","service_name":"checkout-api","service_namespace":"payments",
+  "service_tier":"tier-1","root_span_name":"POST /checkout","start":"2026-07-28T12:03:22Z",
+  "duration_ms":42,"collector_config_version":"sha256:b76e871b…"}]
+```
+
+Prose would mean this package writing sentences *about* telemetry, and a sentence
+is the shape an instruction takes — rendering is exactly where "data, not
+instructions" is easiest to lose. Note what is absent: no preamble, no "here are
+the traces", no framing. The framing lives in the system prompt, which is ours.
+Putting it here would place authored text in the same block as
+attacker-controlled values, and then the two are one string.
 
 ### What that is, and what it is not
 
