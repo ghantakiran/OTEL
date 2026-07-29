@@ -27,6 +27,21 @@ import (
 // wire shape is then the SDK's problem, and a shape error is a compile error
 // instead of a 400 at 3am.
 //
+// TWO FIELDS ARE THE CALLER'S, AND THEY FAIL DIFFERENTLY — worth knowing before
+// the first real call rather than after it:
+//
+//	Model       omitted entirely when unset, because the SDK marshals it with
+//	            omitempty. Deliberately unset here: ADR 0011 names a model that
+//	            has since been superseded (#55), and a serializer that picked one
+//	            would put a stale identifier in every request.
+//	MaxTokens   NOT omitted when unset — it marshals as `"max_tokens": 0`, which
+//	            the API rejects. So an unset MaxTokens is an invalid request
+//	            rather than an absent field, and the 400 says nothing about which
+//	            of the two the caller forgot.
+//
+// Both are the caller's to set. The asymmetry is the SDK's, not this package's,
+// and it is written down because it is invisible from the type.
+//
 // WHERE EVIDENCE LANDS ON THE WIRE, and why it needs saying: a tool_result block
 // travels inside a `role: "user"` message. There is no tool-result role in the
 // API. So the moment this function runs, telemetry is sitting in a user turn —

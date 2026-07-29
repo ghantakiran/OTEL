@@ -381,3 +381,25 @@ func TestTheSerializerChoosesNoModel(t *testing.T) {
 		t.Errorf("the serializer picked a model (%q); that choice is blocked on #55", req.Model)
 	}
 }
+
+// The two caller-supplied fields fail differently on the wire, and the asymmetry
+// is invisible from the type — so it is pinned here rather than left to be
+// discovered by a 400.
+//
+// `model` is omitted when unset; `max_tokens` is not — it marshals as 0, which
+// the API rejects. A caller that forgets either gets an error, but only one of
+// them produces a field that is present and wrong.
+func TestTheCallerSuppliedFieldsBehaveAsDocumented(t *testing.T) {
+	body := wire(t, claude.Serialize(copilot.NewConversation("?"), nil))
+
+	if _, present := body["model"]; present {
+		t.Errorf("model reached the wire unset; it should be omitted entirely: %v", body["model"])
+	}
+	max, present := body["max_tokens"]
+	if !present {
+		t.Fatal("max_tokens is now omitted when unset — the doc comment says otherwise and should be corrected")
+	}
+	if max != float64(0) {
+		t.Errorf("max_tokens = %v, want the documented 0", max)
+	}
+}
