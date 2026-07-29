@@ -152,7 +152,7 @@ func TestGroundRechecksARecordedConversationWithoutTheModel(t *testing.T) {
 	c.AppendAssistant("Looking.", []copilot.ToolUse{{ID: "toolu_01", Name: copilot.QueryTracesTool}})
 	c.AppendToolResult(copilot.ToolResult{
 		ToolUseID: "toolu_01",
-		Evidence:  []copilot.TraceRef{{TraceID: traceA, RootSpanName: "POST /checkout"}},
+		Traces:    []copilot.TraceRef{{TraceID: traceA, RootSpanName: "POST /checkout"}},
 	})
 	c.AppendAssistant("Trace "+traceA+" shows a 42ms root span.", nil)
 

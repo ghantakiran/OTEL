@@ -65,13 +65,22 @@ type ToolUse struct {
 // ToolResult is the answer to one ToolUse. It is the sole carrier of telemetry
 // into a conversation.
 //
-// Evidence is []TraceRef and not a string on purpose. A string would be
+// Traces is []TraceRef and not a string on purpose. A string would be
 // indistinguishable from an authored one the moment it existed, and every
 // downstream guard would have to be a matter of discipline rather than of type.
+//
+// ONE TYPED FIELD PER EVIDENCE KIND. Metrics, Logs, Contract and Standards join
+// Traces as their tools arrive (#17) — as their own concrete fields, never as a
+// union. See evidence.go for why, and for Citation, which is how a caller asks
+// what evidence exists without caring which kind it is.
 type ToolResult struct {
 	ToolUseID string
-	// Evidence is what the tool found. Telemetry-derived, untrusted, data.
-	Evidence []TraceRef
+	// Traces is what the trace tool found. Telemetry-derived, untrusted, data.
+	//
+	// Named Traces and not Evidence since #17: it only ever held traces, and a
+	// field called Evidence sitting beside a Metrics field would be a lie the
+	// next reader pays for.
+	Traces []TraceRef
 	// Path is the health of the road that telemetry travelled: which
 	// configuration was running, and how each Backend's queue is doing.
 	//
@@ -200,14 +209,38 @@ func (c *Conversation) AuthoredText() []string {
 	return out
 }
 
-// Evidence returns every TraceRef that entered the conversation, in order. It is
-// what a later Grounding check (#18) will verify a claim's citations against:
-// a cited trace ID that is not in here was not fetched, whatever the model said.
-func (c *Conversation) Evidence() []TraceRef {
+// Traces returns every TraceRef that entered the conversation, in order.
+//
+// Named Traces and not Evidence since #17, for the same reason the field is:
+// this returns one kind, and a caller that wants every kind wants Citations.
+func (c *Conversation) Traces() []TraceRef {
 	var out []TraceRef
 	for _, t := range c.turns {
 		if t.Role == RoleToolResult && t.Result != nil {
-			out = append(out, t.Result.Evidence...)
+			out = append(out, t.Result.Traces...)
+		}
+	}
+	return out
+}
+
+// Citations returns every piece of evidence that entered the conversation, as
+// kind-and-ID handles, in order.
+//
+// THE KIND-BLIND VIEW, and the reason a caller checking provenance never has to
+// know how many kinds exist. A cited handle that is not in here was not fetched,
+// whatever the model said — which is what Citations (the provenance check) and
+// the grounding index are both really asking.
+//
+// It is the one place that must learn about a new evidence kind, and the
+// tripwire test in this package is what makes sure it does.
+func (c *Conversation) Citations() []Citation {
+	var out []Citation
+	for _, t := range c.turns {
+		if t.Role != RoleToolResult || t.Result == nil {
+			continue
+		}
+		for _, ref := range t.Result.Traces {
+			out = append(out, ref.Citation())
 		}
 	}
 	return out
@@ -411,7 +444,7 @@ func queryTraces(ctx context.Context, store TraceStore, paths TelemetryPathStore
 		return ToolResult{ToolUseID: call.ID, Err: "the query could not be answered"}
 	}
 
-	result := ToolResult{ToolUseID: call.ID, Evidence: refs}
+	result := ToolResult{ToolUseID: call.ID, Traces: refs}
 
 	// The path is best-effort. Knowing which traces exist while not knowing
 	// whether the road was clear is strictly better than knowing neither, and a

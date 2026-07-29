@@ -104,7 +104,7 @@ func TestAHostileSpanNameReachesTheToolResultAndNoPrompt(t *testing.T) {
 	// And it IS present as evidence — otherwise the check above passes for the
 	// uninteresting reason that the tool returned nothing.
 	var found bool
-	for _, e := range c.Evidence() {
+	for _, e := range c.Traces() {
 		if e.RootSpanName == injected {
 			found = true
 		}
@@ -432,7 +432,7 @@ func TestEveryTraceThatEnteredTheConversationIsRecoverable(t *testing.T) {
 		t.Fatalf("Run: %v", err)
 	}
 
-	got := c.Evidence()
+	got := c.Traces()
 	if len(got) != 2 || got[0].TraceID != "aaa" || got[1].TraceID != "bbb" {
 		t.Fatalf("Evidence() = %+v, want both trace IDs in order", got)
 	}

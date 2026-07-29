@@ -149,6 +149,14 @@ type entry struct {
 //
 // A trace returned by two tool results keeps the LATER one. Re-querying during an
 // incident is normal and the second answer is the fresher fact.
+//
+// KEYED BY BARE ID, NOT BY copilot.Citation, and that is a deliberate stopping
+// point rather than an oversight. resolve looks claims up by Claim.CitedTraceIDs,
+// which are bare strings the 32-hex pattern found in the summary — so a Citation
+// key would have to be synthesised as {KindTrace, id} at every lookup, buying
+// nothing while the summary has no syntax for citing anything else. Giving it one
+// means changing SystemPrompt, which the transcript pins by exact match, so it
+// waits for #68. Until then the honest key is the one the claim actually carries.
 func index(c *copilot.Conversation) map[string]entry {
 	out := map[string]entry{}
 	if c == nil {
@@ -161,7 +169,7 @@ func index(c *copilot.Conversation) map[string]entry {
 			continue
 		}
 		order++
-		for _, ref := range turn.Result.Evidence {
+		for _, ref := range turn.Result.Traces {
 			if ref.TraceID == "" {
 				continue
 			}

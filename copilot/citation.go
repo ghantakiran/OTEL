@@ -52,10 +52,15 @@ func Citations(summary string, c *Conversation) (cited, unknown []string) {
 		return nil, nil
 	}
 
+	// Built from Citations rather than from Traces, so this check does not have to
+	// learn a new evidence kind when one arrives (#17). What it matches on is
+	// still trace IDs — the summary's citation SYNTAX is a separate question, and
+	// changing it means changing SystemPrompt, which the transcript pins by exact
+	// match (#68). That is why the two moved apart rather than together.
 	fetched := map[string]bool{}
-	for _, ref := range c.Evidence() {
-		if ref.TraceID != "" {
-			fetched[strings.ToLower(ref.TraceID)] = true
+	for _, cite := range c.Citations() {
+		if cite.ID != "" {
+			fetched[strings.ToLower(cite.ID)] = true
 		}
 	}
 

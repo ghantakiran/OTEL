@@ -10,9 +10,9 @@ package copilot
 //
 // THE FAILURE MODE THIS FILE EXISTS TO MAKE IMPOSSIBLE. A tool result is the sole
 // carrier of telemetry into a conversation (see ToolResult). Within one turn that
-// is held by the type: Evidence is []TraceRef and cannot be confused with authored
+// is held by the type: Traces is []TraceRef and cannot be confused with authored
 // text. The moment a transcript is written to disk and read back, that guarantee
-// is only as good as the wire format — a store that flattened Evidence into a
+// is only as good as the wire format — a store that flattened evidence into a
 // rendered string would hand the next turn's prompt-builder a plain string with no
 // way left to tell it from something the platform wrote. The block-level
 // separation that ADR 0011 depends on would survive the turn and die at the file.
@@ -155,15 +155,41 @@ type toolUseJSON struct {
 
 type toolResultJSON struct {
 	ToolUseID string `json:"tool_use_id"`
-	// Evidence is an ARRAY of records, and that is the load-bearing part of this
+	// Traces is an ARRAY of records, and that is the load-bearing part of this
 	// format. A string here is the bug this file was written to prevent.
-	Evidence []traceRefJSON `json:"evidence"`
+	//
+	// ONE KEY PER EVIDENCE KIND, matching the in-memory shape (#17). When
+	// `metrics` and `logs` join it they are sibling arrays, and a reader can still
+	// tell what each record is from the key it arrived under. That is why this key
+	// was renamed from `evidence`: a key called `evidence` sitting beside `metrics`
+	// would say nothing about what is in it.
+	Traces []traceRefJSON `json:"traces"`
+	// LegacyEvidence accepts the key this field went out under before #17.
+	//
+	// A DECODE-ONLY ALIAS: it has no `omitempty` counterpart on the way out,
+	// because nothing should write it again. It exists because the alternative was
+	// bumping TranscriptVersion, and a version bump is a migration — which is #68,
+	// which does not exist yet. Refusing to load every transcript already written,
+	// in order to rename a key, would be the tail wagging the dog.
+	LegacyEvidence []traceRefJSON `json:"evidence,omitempty"`
 	// TelemetryPath rides on the same result it did in memory, for the same
 	// reason: the two answer one question.
 	TelemetryPath *telemetryPathJSON `json:"telemetry_path,omitempty"`
 	// Error is authored by this package, from a constant. A Backend's own words
 	// never reach it, in memory or here.
 	Error string `json:"error,omitempty"`
+}
+
+// traces is the evidence on this stored result, whichever key carried it.
+//
+// The new key wins when both are present. That combination should not occur —
+// nothing writes both — and picking the current one keeps a hand-edited document
+// from resurrecting a stale array.
+func (r toolResultJSON) traces() []traceRefJSON {
+	if len(r.Traces) > 0 {
+		return r.Traces
+	}
+	return r.LegacyEvidence
 }
 
 type traceRefJSON struct {
@@ -226,11 +252,11 @@ func (c *Conversation) MarshalJSON() ([]byte, error) {
 			r := t.Result
 			res := &toolResultJSON{
 				ToolUseID: r.ToolUseID,
-				Evidence:  make([]traceRefJSON, 0, len(r.Evidence)),
+				Traces:    make([]traceRefJSON, 0, len(r.Traces)),
 				Error:     r.Err,
 			}
-			for _, e := range r.Evidence {
-				res.Evidence = append(res.Evidence, traceRefJSON{
+			for _, e := range r.Traces {
+				res.Traces = append(res.Traces, traceRefJSON{
 					TraceID: e.TraceID,
 					Service: serviceIdentityJSON{
 						Name: e.Service.Name, Namespace: e.Service.Namespace, Tier: e.Service.Tier,
@@ -318,12 +344,12 @@ func (c *Conversation) UnmarshalJSON(b []byte) error {
 
 		if in.Result != nil {
 			r := &ToolResult{ToolUseID: in.Result.ToolUseID, Err: in.Result.Error}
-			for j, e := range in.Result.Evidence {
+			for j, e := range in.Result.traces() {
 				start, err := time.Parse(time.RFC3339Nano, e.Start)
 				if err != nil {
 					return fmt.Errorf("copilot: turn %d evidence %d: start is not RFC3339", i, j)
 				}
-				r.Evidence = append(r.Evidence, TraceRef{
+				r.Traces = append(r.Traces, TraceRef{
 					TraceID: e.TraceID,
 					Service: ServiceIdentity{
 						Name: e.Service.Name, Namespace: e.Service.Namespace, Tier: e.Service.Tier,

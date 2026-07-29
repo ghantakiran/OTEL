@@ -35,7 +35,7 @@ func conversationWith(ids ...string) *copilot.Conversation {
 	for _, id := range ids {
 		refs = append(refs, copilot.TraceRef{TraceID: id, RootSpanName: "POST /checkout"})
 	}
-	c.AppendToolResult(copilot.ToolResult{ToolUseID: "toolu_01", Evidence: refs})
+	c.AppendToolResult(copilot.ToolResult{ToolUseID: "toolu_01", Traces: refs})
 	return c
 }
 
@@ -212,7 +212,7 @@ func TestAClaimIsJudgedAgainstThePathFromItsOwnToolResult(t *testing.T) {
 	c := copilot.NewConversation("Why did checkout-api go quiet?")
 	c.AppendToolResult(copilot.ToolResult{
 		ToolUseID: "toolu_01",
-		Evidence:  []copilot.TraceRef{{TraceID: traceA, RootSpanName: "POST /checkout"}},
+		Traces:    []copilot.TraceRef{{TraceID: traceA, RootSpanName: "POST /checkout"}},
 		Path: &copilot.TelemetryPath{
 			ConfigVersion: "sha256:while-it-was-dropping",
 			PerExporter:   []copilot.ExporterHealth{{Name: "otlp/primary-apm", EnqueueFailed: 512}},
@@ -220,7 +220,7 @@ func TestAClaimIsJudgedAgainstThePathFromItsOwnToolResult(t *testing.T) {
 	})
 	c.AppendToolResult(copilot.ToolResult{
 		ToolUseID: "toolu_02",
-		Evidence:  []copilot.TraceRef{{TraceID: traceB, RootSpanName: "POST /checkout"}},
+		Traces:    []copilot.TraceRef{{TraceID: traceB, RootSpanName: "POST /checkout"}},
 		Path: &copilot.TelemetryPath{
 			ConfigVersion: "sha256:after-it-drained",
 			PerExporter:   []copilot.ExporterHealth{{Name: "otlp/primary-apm", EnqueueFailed: 0}},
