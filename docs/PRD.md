@@ -63,6 +63,30 @@ a summary is checked for **provenance** (was the cited trace fetched?) and
 **support** (does it bear the claim out?); claims that fail either, or that cite
 nothing, reach the operator marked rather than deleted.
 
+**Second slice delivered** (transcript persistence): an exchange now survives the
+process that made it. `copilot.TranscriptStore` (with a file-backed
+implementation) writes a Conversation to a typed JSON document and reads it back,
+and `copilot.Resume` appends the operator's follow-up to a reloaded exchange.
+
+The point of the slice is what the format refuses. Within one turn, ADR 0011's
+block-level separation is held by the type — `ToolResult.Evidence` is
+`[]TraceRef`, not a string. Across a save and a load it would only be as good as
+the wire format, so evidence is stored as a JSON array and a document that carries
+telemetry anywhere else does not load: a tool-result turn with text on it, an
+authored turn with a result attached, or — the shape a flattening store actually
+produces — a tool call with no tool-result turn answering it. A stored system
+prompt that is not this build's constant is refused rather than installed, because
+the system prompt is the operator channel and a transcript is a file on a disk.
+
+Three refusals are **mutation-tested** rather than assumed: removing the
+call/result pairing check, removing the tool-result text rule, and flipping the
+serializer back to concatenating evidence into a user text block each turn a named
+test red.
+
+**Not wired into the loop.** `Run`/`RunWithPath` are untouched: `Resume` hands back
+a `*Conversation` and stops there. What a resumed exchange costs in turns, and how
+it should end, is the tool-runner FSM's question — the next slice, below.
+
 **Three partials, stated plainly**, because the mechanisms exist and the evidence
 that they work does not:
 
@@ -75,8 +99,51 @@ that they work does not:
 Two of the three are closed by the same thing: the **Eval Harness over an Incident
 Corpus** (#20), which is what turns grounding and injection resistance from
 mechanisms into scored properties — and it is the promotion gate for the Autonomy
-Ladder besides (ADR 0012). It is the next thing worth building. The remaining M3
-items — triage tiering (#19), the Advisor rung (#21), the Harm Set — are untouched.
+Ladder besides (ADR 0012).
+
+**Next slice — the tool-runner FSM.** The loop today is a bounded `for` with one
+exit that says anything (the hop budget exhausted) and one that says nothing (the
+model stopped calling tools). An operator cannot tell an answer from a giving-up,
+and neither can an Eval Harness: #20 has to score outcomes, and "returned a
+conversation" is not an outcome. So the loop becomes a small state machine with
+**typed exit reasons**:
+
+| Exit | Meaning |
+|---|---|
+| `answered` | The model stopped calling tools and produced a non-empty summary. |
+| `empty_answer` | The model stopped calling tools and produced nothing. **Not an answer**, and a distinct exit rather than a branch hidden inside `answered` — a run that looks like the good path and is not is the one an Eval Harness must never score as success. |
+| `hop_limit` | The hop budget ran out first. Not an answer. |
+| `tool_exhausted` | N consecutive tool calls failed with no successful call between them. |
+| `model_error` | The model turn itself failed — unreachable, rate-limited, or malformed. Distinct from a tool failing: a Backend that cannot answer and a model that cannot be reached are different operational responses, and today this is the exit the loop most often produces. |
+| `cancelled` | The context was cancelled or its deadline expired — an operator aborting, or a timeout. **#20 must not score this as a failed answer**; it is an absence of a result, not a wrong one. |
+
+Three decisions behind that table, recorded because the names alone do not carry
+them:
+
+**A failing tool does not end the run.** `invoke` returns a `ToolResult` with `Err`
+set and the loop continues, deliberately, so the model can adapt — that is what the
+bounded tool-name echo exists for. That behaviour does not change. `tool_exhausted`
+is a **new terminal condition layered above it**: N consecutive failures with no
+success between them, N configurable with a small default (3). One failed call is
+information; three in a row with nothing working is a loop that is not going to
+converge.
+
+**Grounding rejection is not an exit.** It is deliberately absent from the table. A
+rejected summary costs a hop and the model retries; it never terminates the run.
+That keeps ADR 0009's "marked, not deleted" (#66) intact — an operator gets an
+annotated summary rather than nothing when grounding is strict — and it keeps the
+loop's dependencies unchanged: `copilot` imports nothing from `copilot/grounding`,
+and adding a terminal grounding exit would have inverted that by putting a Judge
+inside the loop.
+
+**"Hop", not "turn".** The glossary says hop; the code says `MaxTurns`. The FSM PR
+renames it to `MaxHops` (aliasing the old name) so the two agree, rather than
+leaving a synonym for a load-bearing bound.
+
+This is also where the transcript store gets wired in — a bounded loop that can
+resume is the shape that needs one. Then #20, which the typed exits are a
+precondition for. The remaining M3 items — triage tiering (#19), the Advisor rung
+(#21), the Harm Set — are untouched.
 
 **Not yet built**: `query_metrics`, `query_logs`, `get_contract`, `get_standards`
 (P2, #17). The grounding mechanism does not need to change when they arrive — a
