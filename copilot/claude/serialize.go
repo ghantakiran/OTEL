@@ -121,7 +121,40 @@ func toolResultMessage(turn copilot.Turn) anthropic.MessageParam {
 			anthropic.NewToolResultBlock(r.ToolUseID, r.Err, true))
 	}
 	return anthropic.NewUserMessage(
-		anthropic.NewToolResultBlock(r.ToolUseID, renderEvidence(r.Evidence), false))
+		anthropic.NewToolResultBlock(r.ToolUseID, renderResult(*r), false))
+}
+
+// resultJSON is the wire form of one tool answer: the traces, and the state of
+// the road they travelled.
+//
+// Both ride in ONE tool result because they answer one question. A model that had
+// to remember to ask twice would sometimes answer from half the evidence — and
+// the half it would skip is the one that distinguishes a broken service from a
+// broken telemetry path.
+type resultJSON struct {
+	Traces        []evidenceJSON `json:"traces"`
+	TelemetryPath *pathJSON      `json:"telemetry_path,omitempty"`
+}
+
+// pathJSON is the wire form of a TelemetryPath.
+//
+// `collectors_reporting` is stated rather than left to be inferred from an empty
+// array: "no collector has reported" and "every collector is healthy" are
+// different findings, and an empty list reads like the second.
+type pathJSON struct {
+	ConfigVersion       string         `json:"collector_config_version,omitempty"`
+	CollectorsReporting bool           `json:"collectors_reporting"`
+	PerBackend          []exporterJSON `json:"per_backend"`
+	TelemetryDropped    bool           `json:"telemetry_dropped"`
+}
+
+// exporterJSON is one Backend's delivery health. The name is the Backend's.
+type exporterJSON struct {
+	Backend       string  `json:"backend"`
+	QueueSize     float64 `json:"queue_size"`
+	QueueCapacity float64 `json:"queue_capacity"`
+	EnqueueFailed float64 `json:"telemetry_dropped_count"`
+	SendFailed    float64 `json:"send_failed_count"`
 }
 
 // evidenceJSON is the wire form of a TraceRef.
@@ -141,7 +174,7 @@ type evidenceJSON struct {
 	ConfigVersion string `json:"collector_config_version,omitempty"`
 }
 
-// renderEvidence is THE TraceRef → string function. There is no other, and it is
+// renderResult is THE telemetry → string function. There is no other, and it is
 // unexported so there cannot be one outside this file.
 //
 // JSON rather than prose, deliberately. Prose would require this function to
@@ -153,10 +186,10 @@ type evidenceJSON struct {
 // framing lives in the system prompt, which is ours. Putting it here would place
 // authored text in the same block as attacker-controlled values, and then the two
 // are one string.
-func renderEvidence(refs []copilot.TraceRef) string {
-	out := make([]evidenceJSON, 0, len(refs))
-	for _, r := range refs {
-		out = append(out, evidenceJSON{
+func renderResult(r copilot.ToolResult) string {
+	out := resultJSON{Traces: make([]evidenceJSON, 0, len(r.Evidence))}
+	for _, r := range r.Evidence {
+		out.Traces = append(out.Traces, evidenceJSON{
 			TraceID:       r.TraceID,
 			ServiceName:   r.Service.Name,
 			Namespace:     r.Service.Namespace,
@@ -168,12 +201,31 @@ func renderEvidence(refs []copilot.TraceRef) string {
 		})
 	}
 
+	if p := r.Path; p != nil {
+		path := &pathJSON{
+			ConfigVersion:       p.ConfigVersion,
+			CollectorsReporting: len(p.PerExporter) > 0,
+			PerBackend:          make([]exporterJSON, 0, len(p.PerExporter)),
+			TelemetryDropped:    p.Dropping(),
+		}
+		for _, e := range p.PerExporter {
+			path.PerBackend = append(path.PerBackend, exporterJSON{
+				Backend:       e.Name,
+				QueueSize:     e.QueueSize,
+				QueueCapacity: e.QueueCapacity,
+				EnqueueFailed: e.EnqueueFailed,
+				SendFailed:    e.SendFailed,
+			})
+		}
+		out.TelemetryPath = path
+	}
+
 	// A marshalling failure cannot come from the fields above — every one is a
-	// string or an int — but returning an empty array rather than the zero value
-	// keeps the tool result parseable whatever happens.
+	// string, a bool or a number — but returning an empty object rather than the
+	// zero value keeps the tool result parseable whatever happens.
 	body, err := json.Marshal(out)
 	if err != nil {
-		return "[]"
+		return `{"traces":[]}`
 	}
 	return string(body)
 }

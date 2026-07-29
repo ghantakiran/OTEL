@@ -236,13 +236,18 @@ func TestEvidenceIsRenderedAsDataRatherThanProse(t *testing.T) {
 		t.Fatal("no tool_result content was serialized")
 	}
 
-	var refs []map[string]any
-	if err := json.Unmarshal([]byte(content), &refs); err != nil {
-		t.Fatalf("tool_result content is not a JSON array: %v\n%s", err, content)
+	var result map[string]any
+	if err := json.Unmarshal([]byte(content), &result); err != nil {
+		t.Fatalf("tool_result content is not a JSON object: %v\n%s", err, content)
 	}
-	if len(refs) != 1 {
-		t.Fatalf("got %d evidence records, want 1", len(refs))
+	traces, ok := result["traces"].([]any)
+	if !ok {
+		t.Fatalf("the tool result carries no traces array:\n%s", content)
 	}
+	if len(traces) != 1 {
+		t.Fatalf("got %d evidence records, want 1", len(traces))
+	}
+	refs := []map[string]any{traces[0].(map[string]any)}
 
 	// The fields a citation needs.
 	if refs[0]["trace_id"] != "fe3852be4562dca17922b0b2758ff910" {
@@ -401,5 +406,100 @@ func TestTheCallerSuppliedFieldsBehaveAsDocumented(t *testing.T) {
 	}
 	if max != float64(0) {
 		t.Errorf("max_tokens = %v, want the documented 0", max)
+	}
+}
+
+// The telemetry path rides in the SAME tool result as the traces. Without it
+// reaching the model, a summary has no basis to say "telemetry-path" rather than
+// "service", and #16's fourth criterion has no evidence behind it.
+func TestTheTelemetryPathReachesTheModelInTheSameToolResult(t *testing.T) {
+	c := copilot.NewConversation("Why is checkout-api quiet?")
+	c.AppendAssistant("Checking.", []copilot.ToolUse{{
+		ID: "toolu_01", Name: copilot.QueryTracesTool, Input: json.RawMessage(`{"service_name":"checkout-api"}`),
+	}})
+	c.AppendToolResult(copilot.ToolResult{
+		ToolUseID: "toolu_01",
+		Evidence:  evidence(),
+		Path: &copilot.TelemetryPath{
+			ConfigVersion: "sha256:b76e871b",
+			PerExporter: []copilot.ExporterHealth{
+				{Name: "otlp/primary-apm", QueueSize: 20000, QueueCapacity: 20000, EnqueueFailed: 417},
+				{Name: "otlp/cold-archive", QueueSize: 0, QueueCapacity: 2000},
+			},
+		},
+	})
+
+	body := wire(t, claude.Serialize(c, nil))
+
+	var content string
+	for _, m := range body["messages"].([]any) {
+		for _, b := range m.(map[string]any)["content"].([]any) {
+			block := b.(map[string]any)
+			if block["type"] != "tool_result" {
+				continue
+			}
+			for _, inner := range block["content"].([]any) {
+				if text, ok := inner.(map[string]any)["text"].(string); ok {
+					content = text
+				}
+			}
+		}
+	}
+
+	var result map[string]any
+	if err := json.Unmarshal([]byte(content), &result); err != nil {
+		t.Fatalf("tool_result content is not JSON: %v\n%s", err, content)
+	}
+
+	path, ok := result["telemetry_path"].(map[string]any)
+	if !ok {
+		t.Fatalf("the telemetry path did not reach the model:\n%s", content)
+	}
+	if path["telemetry_dropped"] != true {
+		t.Error("a path with a non-zero drop count does not report telemetry_dropped")
+	}
+	if path["collectors_reporting"] != true {
+		t.Error("collectors_reporting is false despite two Backends reporting")
+	}
+
+	perBackend, ok := path["per_backend"].([]any)
+	if !ok || len(perBackend) != 2 {
+		t.Fatalf("per_backend = %v, want two Backends", path["per_backend"])
+	}
+	first := perBackend[0].(map[string]any)
+	if first["backend"] != "otlp/primary-apm" {
+		t.Errorf("backend = %v, want it named after the Backend", first["backend"])
+	}
+	if first["telemetry_dropped_count"] != float64(417) {
+		t.Errorf("telemetry_dropped_count = %v, want 417", first["telemetry_dropped_count"])
+	}
+}
+
+// A tool result with no path says so by omission rather than by shipping an empty
+// object that reads as "everything healthy".
+func TestAToolResultWithNoPathOmitsItRatherThanImplyingHealth(t *testing.T) {
+	body := wire(t, claude.Serialize(conversation(t), nil))
+
+	for _, m := range body["messages"].([]any) {
+		blocks, ok := m.(map[string]any)["content"].([]any)
+		if !ok {
+			continue
+		}
+		for _, b := range blocks {
+			block := b.(map[string]any)
+			if block["type"] != "tool_result" {
+				continue
+			}
+			for _, inner := range block["content"].([]any) {
+				text, _ := inner.(map[string]any)["text"].(string)
+				var result map[string]any
+				if err := json.Unmarshal([]byte(text), &result); err != nil {
+					continue
+				}
+				if _, present := result["telemetry_path"]; present {
+					t.Errorf("a result with no path carries a telemetry_path key: %s", text)
+				}
+			}
+		}
 	}
 }

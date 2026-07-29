@@ -186,14 +186,86 @@ between its stubbed test and its real one. A trace store that renamed a field, o
 a metrics Backend upgraded past the label promotion, leaves every hermetic test
 green and turns these red, which is the correct place for that failure to appear.
 
-## What this does not do yet
+## Two questions, one tool result
 
-No model is called. There is no vendor SDK, no API key path, and **no model ID** —
-ADR 0011 names one that has since been superseded, which is #55, and committing to
-it here would put a stale identifier in the loop as well as in the ADR.
+Traces alone cannot tell a broken service from a broken telemetry path. A service
+that has gone quiet because it crashed and one whose telemetry is being dropped in
+transit look identical: thin trace data, either way.
 
-`Run` drives the loop against a `Model` interface; the only implementation today
-is a test double. What is missing to make it real is small and listed in the
-second P1 slice: an adapter that serializes a `Conversation` to the API's message
-shape, renders `[]TraceRef` into `tool_result` blocks, and returns the model's
-turn.
+So `query_traces` returns both:
+
+```json
+{
+  "traces": [ … ],
+  "telemetry_path": {
+    "collector_config_version": "sha256:b76e871b…",
+    "collectors_reporting": true,
+    "telemetry_dropped": true,
+    "per_backend": [
+      {"backend": "otlp/primary-apm", "queue_size": 20000, "queue_capacity": 20000,
+       "telemetry_dropped_count": 417, "send_failed_count": 0}
+    ]
+  }
+}
+```
+
+**One tool, not two.** A model that had to remember to ask a second time would
+sometimes answer from half the evidence — and the half it would skip is exactly
+the half that makes the distinction. `collectors_reporting` is stated rather than
+inferred from an empty array, because "no collector has reported" and "every
+collector is healthy" are different findings and an empty list reads like the
+second.
+
+### The absence that looks like health
+
+Prometheus creates **no series** for a counter that has never incremented, so both
+failure counters are missing from a healthy response — not zero, absent. A missing
+counter is read as 0, which is correct for a counter and indistinguishable from
+what you would see if the metric name were wrong.
+
+What makes that safe is an asymmetry between the two kinds:
+
+| | Behaviour when absent | Failure mode if the name is wrong |
+|---|---|---|
+| **gauges** (`queue_size`, `queue_capacity`) | the exporter never enters the result at all | the Backend vanishes from the report — **loud** |
+| **counters** (`enqueue_failed`, `send_failed`) | genuinely zero | reads as healthy — **silent** |
+
+An exporter only appears when its gauges do, so nothing is reported healthy by
+default. The silent case is caught only by `TestHarnessTheTelemetryPathIsQueryable`
+running against a real Backend, which is why that test exists.
+
+## Citation provenance — and what it is not
+
+`Citations(summary, conversation)` partitions the trace IDs a summary mentions
+into those the tools actually returned and those they did not. `Grounded()` is
+true when nothing is fabricated **and at least one trace is cited** — the second
+half matters, because "no unknown IDs" is trivially true of a summary that cites
+nothing at all, which is the exact failure ADR 0009 is about.
+
+**This is provenance, not support — Partial → #53.** Two different questions:
+
+- *provenance* — was this trace actually fetched? Decidable here, because the
+  conversation records what came back.
+- *support* — does this trace bear out the claim attached to it? A real trace
+  cited for something it does not show is still wrong.
+
+Provenance is the cheaper check and it looks like the expensive one. A summary
+whose every ID is real reads as verified; it is only **un-hallucinated**. #18
+supplies the mechanism for support and #20 measures it.
+
+## Where #16 stands
+
+| Criterion | Status |
+|---|---|
+| Tool Runner loop with a `query_traces` typed tool | ✅ |
+| Summary citing the traces it used | **Partial → #53** — provenance checked, support not |
+| Telemetry as tool-result content, never instructions | ✅ at the wire — **Partial → #54**: structural, never adversarially tested |
+| Distinguishes service failure from telemetry-path failure | **Partial → #51** — real Backend queries (#50); one host, not a fleet |
+| No vendor query language crosses the tool seam | ✅ |
+
+## What this still does not do
+
+No API key is read and no request leaves the machine in any test — the model
+adapter is exercised against `httptest` with recorded response bodies. Running it
+for real needs a key and a `Config{Model, MaxTokens}`; both are refused at
+construction when missing, because the API's 400 names neither.

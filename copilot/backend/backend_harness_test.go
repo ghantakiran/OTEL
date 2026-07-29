@@ -118,3 +118,34 @@ func TestHarnessNoSpanCarriesTheVersionItselfWhichIsWhyItIsJoined(t *testing.T) 
 		t.Fatalf("a service that does not exist returned %d traces", len(refs))
 	}
 }
+
+// The telemetry path, live. This is the one that catches a wrong COUNTER name:
+// an absent counter reads as zero in the hermetic tests by design, so only a real
+// Backend can tell "never incremented" from "I asked for the wrong series".
+func TestHarnessTheTelemetryPathIsQueryable(t *testing.T) {
+	b := harness(t)
+
+	path, err := b.QueryTelemetryPath(context.Background(),
+		copilot.ServiceIdentity{Name: "otel-gateway"})
+	if err != nil {
+		t.Fatalf("QueryTelemetryPath against the harness: %v", err)
+	}
+
+	if len(path.PerExporter) == 0 {
+		t.Fatal("no Backend health came back — the Gateway's self-telemetry has not arrived (30s interval), or a gauge name is wrong")
+	}
+	for _, e := range path.PerExporter {
+		if e.Name == "" {
+			t.Error("a Backend came back with no exporter name; per-Backend attribution is lost")
+		}
+		// Every Backend the Declaration names has a compiled queue_size, so a
+		// zero capacity means the gauge did not arrive rather than that the
+		// Backend has none.
+		if e.QueueCapacity == 0 {
+			t.Errorf("%s reports a zero queue capacity; the declared queue_size did not survive", e.Name)
+		}
+	}
+	if path.ConfigVersion == "" {
+		t.Error("no config_version was joined onto the path")
+	}
+}

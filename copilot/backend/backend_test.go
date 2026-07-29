@@ -65,8 +65,14 @@ const (
 // what this adapter SENDS is as much of its behaviour as what it returns, and it
 // is the only place a query language is written.
 type recorded struct {
-	traceQuery   string
+	traceQuery string
+	// metricsQuery is the LAST metrics query sent. Several adapter calls send
+	// more than one — QueryTelemetryPath asks for the per-exporter health and
+	// then joins the config_version — so a test asserting on the first must read
+	// metricsQueries instead of this.
 	metricsQuery string
+	// metricsQueries is every metrics query sent, in order.
+	metricsQueries []string
 }
 
 func backends(t *testing.T, searchBody, metricsBody string) (*backend.TempoPrometheus, *recorded) {
@@ -82,6 +88,7 @@ func backends(t *testing.T, searchBody, metricsBody string) (*backend.TempoProme
 
 	metrics := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		got.metricsQuery = r.URL.Query().Get("query")
+		got.metricsQueries = append(got.metricsQueries, got.metricsQuery)
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(metricsBody))
 	}))
