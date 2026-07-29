@@ -67,7 +67,7 @@ var (
 	// the change unloadable. That is deliberate for a tracer bullet — a transcript
 	// replayed under a prompt it was not produced under is a different exchange
 	// wearing the same ID — but it is a migration this format does not yet have,
-	// and #20's Eval Harness replay is what will need one first.
+	// and #20's Eval Harness replay is what will need one first. Tracked by #68.
 	ErrSystemPromptMismatch = errors.New("copilot: stored system prompt is not this build's SystemPrompt")
 
 	// ErrNoTranscript is returned by a TranscriptStore for an ID it does not hold.
