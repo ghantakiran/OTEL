@@ -1,6 +1,7 @@
 package claude_test
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -335,18 +336,39 @@ func TestToolUseBlocksAreEchoedBackSoResultsCanBePaired(t *testing.T) {
 	}
 }
 
-// The tool the model is shown still names no product. The schema was built
-// vendor-neutral in `copilot`; serialization must not add one.
+// DRIVEN OFF THE REGISTRY, NOT OFF A HAND-WRITTEN LIST, and that is the
+// difference #17 made here.
+//
+// This test used to serialize `[]copilot.ToolSchema{copilot.QueryTracesSchema()}`
+// — a list written out in the test itself. It proved that ONE tool named no
+// vendor, and it would have gone on proving exactly that after query_metrics,
+// query_logs, get_contract and get_standards arrived: a new tool could carry
+// PromQL in its description and this test would stay green, because the test
+// never saw it.
+//
+// It now walks copilot.PlatformTools, which is the one place a tool is added. A
+// tool that is not in there is not on the surface, and a tool that is in there is
+// checked here — without anyone remembering to extend a list.
 func TestTheSerializedToolSurfaceNamesNoVendor(t *testing.T) {
-	body := wire(t, claude.Serialize(copilot.NewConversation("?"),
-		[]copilot.ToolSchema{copilot.QueryTracesSchema()}))
+	set, err := copilot.PlatformTools(&noStore{}, nil)
+	if err != nil {
+		t.Fatalf("the platform's tool surface does not build: %v", err)
+	}
+	body := wire(t, claude.Serialize(copilot.NewConversation("?"), set.Schemas()))
+
+	sent, ok := body["tools"].([]any)
+	if !ok {
+		t.Fatal("no tools reached the wire")
+	}
+	// The whole surface goes out. A serializer that dropped one would leave the
+	// model unable to call a tool the loop can dispatch — the same lie as the
+	// reverse, from the other side.
+	if len(sent) != len(set.Names()) {
+		t.Fatalf("%d tools on the wire, %d on the surface", len(sent), len(set.Names()))
+	}
 
 	tools, _ := json.Marshal(body["tools"])
 	haystack := strings.ToLower(string(tools))
-
-	if len(body["tools"].([]any)) != 1 {
-		t.Fatalf("got %d tools, want 1", len(body["tools"].([]any)))
-	}
 	for _, vendor := range []string{
 		"tempo", "prometheus", "promql", "traceql", "grafana", "jaeger",
 		"datadog", "splunk", "honeycomb", "elastic", "loki",
@@ -356,24 +378,64 @@ func TestTheSerializedToolSurfaceNamesNoVendor(t *testing.T) {
 		}
 	}
 
-	tool := body["tools"].([]any)[0].(map[string]any)
-	if tool["name"] != copilot.QueryTracesTool {
-		t.Errorf("tool name = %v", tool["name"])
+	// PER TOOL, because the boundary is per tool. A surface safe in query_traces
+	// and unsafe in get_standards is only half safe — the same argument the
+	// adversarial fixtures make one field at a time.
+	for i, entry := range sent {
+		tool, ok := entry.(map[string]any)
+		if !ok {
+			t.Fatalf("tool %d is not an object", i)
+		}
+		name, _ := tool["name"].(string)
+		if !set.Has(name) {
+			t.Errorf("a tool named %q reached the wire and the surface cannot dispatch it", name)
+		}
+		schema, ok := tool["input_schema"].(map[string]any)
+		if !ok {
+			t.Fatalf("%s went out with no input_schema", name)
+		}
+		props, ok := schema["properties"].(map[string]any)
+		if !ok {
+			t.Fatalf("%s carries no properties", name)
+		}
+
+		// THE FREE-TEXT BAN, asserted over the whole surface rather than over one
+		// tool's `filter`. A free-text parameter is how a Backend's query language
+		// crosses the seam by the back door: the model would be free to write
+		// TraceQL or PromQL into it, and every prompt would end up carrying one.
+		// There is no such field today and there will not be one, so the check is
+		// against the shape rather than against a single spelling.
+		for _, freetext := range []string{
+			"filter", "query", "q", "expr", "expression",
+			"promql", "traceql", "logql", "selector", "search", "where",
+		} {
+			if _, found := props[freetext]; found {
+				t.Errorf("%s takes a free-text %q parameter; a query language can cross there", name, freetext)
+			}
+		}
 	}
-	schema, ok := tool["input_schema"].(map[string]any)
-	if !ok {
-		t.Fatal("the tool went out with no input_schema")
+
+	// And the one tool P1 shipped still carries what it carried.
+	for _, entry := range sent {
+		m := entry.(map[string]any)
+		if m["name"] != copilot.QueryTracesTool {
+			continue
+		}
+		props := m["input_schema"].(map[string]any)["properties"].(map[string]any)
+		if _, hasServiceName := props["service_name"]; !hasServiceName {
+			t.Error("service_name did not survive into the serialized schema")
+		}
 	}
-	props, ok := schema["properties"].(map[string]any)
-	if !ok {
-		t.Fatal("the tool's input_schema carries no properties")
-	}
-	if _, hasServiceName := props["service_name"]; !hasServiceName {
-		t.Error("service_name did not survive into the serialized schema")
-	}
-	if _, hasFilter := props["filter"]; hasFilter {
-		t.Error("a free-text filter parameter reached the wire")
-	}
+}
+
+// noStore is a TraceStore that is never called: these tests serialize a tool
+// surface rather than run it. It exists because PlatformTools needs a store to
+// bind a handler to, and binding one is the point — a schema with no handler
+// cannot reach the wire.
+type noStore struct{}
+
+func (noStore) QueryTraces(context.Context, copilot.TraceQuery) ([]copilot.TraceRef, error) {
+	return nil, nil
 }
 
 // No model ID is chosen here. ADR 0011 names one that has since been superseded

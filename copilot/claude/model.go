@@ -41,7 +41,13 @@ type Config struct {
 
 	// Tools is the surface the model is shown. Built in `copilot` with no vendor
 	// in it; this package only renders it.
-	Tools []copilot.ToolSchema
+	//
+	// A *ToolSet AND NOT A []ToolSchema, which is the whole of what #17 hardened
+	// here. A schema list would let a caller advertise a tool the loop cannot
+	// dispatch — the model would call it, get "no such tool" back as an ordinary
+	// result, and spend a hop apologising. A ToolSet cannot be built from a
+	// schema that has no handler, so that request can no longer be constructed.
+	Tools *copilot.ToolSet
 }
 
 // The two construction failures, named so a caller can tell them apart from each
@@ -66,7 +72,7 @@ type Client struct {
 	api       anthropic.Client
 	model     string
 	maxTokens int64
-	tools     []copilot.ToolSchema
+	tools     *copilot.ToolSet
 }
 
 var _ copilot.Model = (*Client)(nil)
@@ -116,7 +122,9 @@ func requestOptions(cfg Config) []option.RequestOption {
 // parameter but not the reason. Behaviour is steered by the system prompt, which
 // is a constant in `copilot` (ADR 0011, amendment).
 func (c *Client) Next(ctx context.Context, conv *copilot.Conversation) (copilot.Assistant, error) {
-	req := Serialize(conv, c.tools)
+	// Schemas() is the only route from a ToolSet to the wire, so what goes out as
+	// `tools` is exactly what the loop can dispatch.
+	req := Serialize(conv, c.tools.Schemas())
 	req.Model = anthropic.Model(c.model)
 	req.MaxTokens = c.maxTokens
 
