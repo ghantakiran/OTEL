@@ -72,6 +72,15 @@ type ToolResult struct {
 	ToolUseID string
 	// Evidence is what the tool found. Telemetry-derived, untrusted, data.
 	Evidence []TraceRef
+	// Path is the health of the road that telemetry travelled: which
+	// configuration was running, and how each Backend's queue is doing.
+	//
+	// It rides on the SAME tool result as the traces rather than arriving from a
+	// second tool, because the two are one question — "what is happening with
+	// this service?" — and a model that had to remember to ask twice would
+	// sometimes answer from half the evidence. Nil when no path store was
+	// supplied; a nil Path and a healthy one are different findings.
+	Path *TelemetryPath
 	// Err is set when the tool could not answer. It is authored by this package,
 	// never by a Backend, so that a Backend's error message cannot become
 	// instructions either.
@@ -310,6 +319,16 @@ const MaxTurns = 8
 // one invariant it holds: evidence goes back via AppendToolResult and by no other
 // route.
 func Run(ctx context.Context, m Model, store TraceStore, question string) (*Conversation, error) {
+	return RunWithPath(ctx, m, store, nil, question)
+}
+
+// RunWithPath is Run with the telemetry-path evidence attached to every tool
+// result, so a summary can tell a failing service from a failing telemetry path.
+//
+// A separate entry point rather than a fourth parameter on Run: a caller with no
+// path store should not have to pass a nil, and the two names say which evidence
+// the resulting summary was allowed to rest on.
+func RunWithPath(ctx context.Context, m Model, store TraceStore, path TelemetryPathStore, question string) (*Conversation, error) {
 	if store == nil {
 		return nil, ErrNoTraceStore
 	}
@@ -326,7 +345,7 @@ func Run(ctx context.Context, m Model, store TraceStore, question string) (*Conv
 			return c, nil
 		}
 		for _, call := range next.Calls {
-			c.AppendToolResult(invoke(ctx, store, call))
+			c.AppendToolResult(invoke(ctx, store, path, call))
 		}
 	}
 	return c, fmt.Errorf("copilot: gave up after %d turns without an answer", MaxTurns)
@@ -339,7 +358,7 @@ func Run(ctx context.Context, m Model, store TraceStore, question string) (*Conv
 // through: an error string from a Backend is as attacker-influenced as a span
 // name, and it would otherwise be the one telemetry-derived string that reached
 // the model outside of Evidence.
-func invoke(ctx context.Context, store TraceStore, call ToolUse) ToolResult {
+func invoke(ctx context.Context, store TraceStore, paths TelemetryPathStore, call ToolUse) ToolResult {
 	if call.Name != QueryTracesTool {
 		// The name is echoed because a model that asked for the wrong tool needs
 		// to know which one — but it is MODEL-AUTHORED text going back into a
@@ -377,7 +396,18 @@ func invoke(ctx context.Context, store TraceStore, call ToolUse) ToolResult {
 		// Note what is NOT here: err.Error(). See the doc comment above.
 		return ToolResult{ToolUseID: call.ID, Err: "the query could not be answered"}
 	}
-	return ToolResult{ToolUseID: call.ID, Evidence: refs}
+
+	result := ToolResult{ToolUseID: call.ID, Evidence: refs}
+
+	// The path is best-effort. Knowing which traces exist while not knowing
+	// whether the road was clear is strictly better than knowing neither, and a
+	// nil Path says so rather than implying health.
+	if paths != nil {
+		if p, err := paths.QueryTelemetryPath(ctx, q.Service); err == nil {
+			result.Path = &p
+		}
+	}
+	return result
 }
 
 // parseRFC3339 is a named helper for one reason: it DISCARDS the parse error.

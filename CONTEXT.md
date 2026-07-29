@@ -30,6 +30,14 @@ _Avoid_: Function, API, endpoint, capability, skill
 A citable handle on one trace — its ID, the identity its Telemetry Contract stamped, what the root span was, and the Config Version of the collector carrying it. It is a reference and not a summary, which is what makes Grounding checkable: a claim points at a handle an operator can follow rather than at prose about telemetry the Copilot saw once. The Config Version is *joined* from Self-Telemetry rather than read off the span, because the Agent strips the `otel.platform.` namespace from everything it forwards.
 _Avoid_: Trace, span, evidence blob, result, record
 
+**Citation Provenance**:
+The check that every trace the Copilot cites was actually returned by a Typed Tool — decidable from the conversation, because it records exactly what came back. **Distinct from support**, which asks whether a cited trace bears out the claim attached to it; a real trace cited for something it does not show is still wrong, and judging that needs a reader of both (#18 supplies the mechanism, #20 measures it, #53 tracks the gap). Provenance is the cheaper check and looks like the expensive one: a summary whose every ID is real reads as verified when it is only un-hallucinated. A summary citing *nothing* fails provenance too — an ungrounded claim cites nothing at all, which is exactly what Grounding forbids.
+_Avoid_: Citation checking, verification, fact-checking, grounding (bare)
+
+**Telemetry Path**:
+The state of the road a service's telemetry travelled, as opposed to the state of the service that emitted it: which Config Version the collector was running, and each Backend's queue depth, capacity and drop count. It exists to make one distinction available — a service that has gone quiet because it is broken looks identical, **in traces alone**, to one whose telemetry is being dropped on the way. Thin traces plus a healthy path means the service; thin traces plus a filling queue means the path. Carried on the same Typed Tool result as the traces, because a Copilot that had to remember to ask twice would sometimes answer from half the evidence.
+_Avoid_: Pipeline health, collector status, delivery metrics, exporter stats
+
 **Grounding**:
 The requirement that every claim the Copilot makes cites the specific telemetry evidence behind it (a trace, metric query, or log query); an ungrounded hypothesis is suppressed or flagged low-confidence.
 _Avoid_: Citation, sourcing, attribution

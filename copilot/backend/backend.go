@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -62,7 +63,10 @@ type TempoPrometheus struct {
 
 // compile-time proof that this adapter is the seam's implementation and not
 // merely a type with a similar method.
-var _ copilot.TraceStore = (*TempoPrometheus)(nil)
+var (
+	_ copilot.TraceStore         = (*TempoPrometheus)(nil)
+	_ copilot.TelemetryPathStore = (*TempoPrometheus)(nil)
+)
 
 func (b *TempoPrometheus) client() *http.Client {
 	if b.HTTP != nil {
@@ -169,10 +173,28 @@ func (b *TempoPrometheus) search(ctx context.Context, q copilot.TraceQuery, sinc
 type promVectorResponse struct {
 	Status string `json:"status"`
 	Data   struct {
-		Result []struct {
-			Metric map[string]string `json:"metric"`
-		} `json:"result"`
+		Result []promSample `json:"result"`
 	} `json:"data"`
+}
+
+// promSample is one series and its instant value. The value arrives as
+// [<unix seconds, number>, "<sample, string>"] — a two-element heterogeneous
+// array, which is why it is decoded as []any rather than a typed pair.
+type promSample struct {
+	Metric map[string]string `json:"metric"`
+	Value  []any             `json:"value"`
+}
+
+// sample is the numeric reading, as the string the API sends it as. An empty
+// return means the series carried no usable value, which the caller skips rather
+// than reading as a zero — a zero queue depth and an absent one are different
+// findings.
+func (s promSample) sample() string {
+	if len(s.Value) < 2 {
+		return ""
+	}
+	v, _ := s.Value[1].(string)
+	return v
 }
 
 // configVersion asks which configuration this service's collector is running.
@@ -210,6 +232,104 @@ func (b *TempoPrometheus) configVersion(ctx context.Context, service string) str
 		}
 	}
 	return ""
+}
+
+// pathMetrics are the four readings that describe a Backend's delivery health.
+//
+// The gauges keep their collector-side names; the counters gain `_total` when
+// Prometheus ingests them, because a monotonic sum is renamed on the way in. Both
+// spellings are measured rather than assumed — getting one wrong returns an empty
+// vector, which reads exactly like a healthy path.
+var pathMetrics = []string{
+	"otelcol_exporter_queue_size",
+	"otelcol_exporter_queue_capacity",
+	"otelcol_exporter_enqueue_failed_spans_total",
+	"otelcol_exporter_send_failed_spans_total",
+}
+
+// QueryTelemetryPath reports on the collectors carrying this service's telemetry.
+//
+// ONE ROUND TRIP FOR FOUR METRICS. A regex over `__name__` returns all of them in
+// a single vector, keyed by metric and exporter — four separate queries would
+// sample four different instants, and a queue depth compared against a capacity
+// read a second later is a ratio of two different moments.
+//
+// Every spelling is measured, not guessed (docs/backend-label-mapping.md):
+// the two queue metrics are gauges and keep their names, while the failure
+// counters are sums and gain `_total` on ingest. Getting a name wrong returns an
+// empty vector, which reads exactly like a healthy path.
+func (b *TempoPrometheus) QueryTelemetryPath(ctx context.Context, service copilot.ServiceIdentity) (copilot.TelemetryPath, error) {
+	if service.Name == "" {
+		return copilot.TelemetryPath{}, copilot.ErrNoService
+	}
+
+	// Spelled out rather than factored into a common prefix. A regex like
+	// `otelcol_exporter_(queue_size|...)` is shorter and hides the very thing most
+	// likely to be wrong: these four names are MEASURED facts
+	// (docs/backend-label-mapping.md), and a reader — or a grep — should be able
+	// to find each one whole in the source that sends it.
+	q := fmt.Sprintf(
+		`max by (__name__, exporter) ({__name__=~"%s", service_name=%s})`,
+		strings.Join(pathMetrics, "|"), quote(service.Name))
+
+	params := url.Values{}
+	params.Set("query", q)
+
+	var body promVectorResponse
+	if err := b.getJSON(ctx, b.MetricsURL+"/api/v1/query?"+params.Encode(), &body); err != nil {
+		return copilot.TelemetryPath{}, fmt.Errorf("copilot/backend: querying the telemetry path: %w", err)
+	}
+	if body.Status != "success" {
+		return copilot.TelemetryPath{}, fmt.Errorf("copilot/backend: the telemetry-path query did not run")
+	}
+
+	// Keyed by exporter, because that is the Backend. Insertion order is not
+	// stable across a map, so the slice is sorted before it is returned — an
+	// unstable order would make a summary differ run to run for no reason.
+	byExporter := map[string]*copilot.ExporterHealth{}
+	for _, r := range body.Data.Result {
+		exporter := r.Metric["exporter"]
+		if exporter == "" {
+			continue
+		}
+		health, seen := byExporter[exporter]
+		if !seen {
+			health = &copilot.ExporterHealth{Name: exporter}
+			byExporter[exporter] = health
+		}
+
+		value, err := strconv.ParseFloat(r.sample(), 64)
+		if err != nil {
+			continue
+		}
+		switch r.Metric["__name__"] {
+		case "otelcol_exporter_queue_size":
+			health.QueueSize = value
+		case "otelcol_exporter_queue_capacity":
+			health.QueueCapacity = value
+		case "otelcol_exporter_enqueue_failed_spans_total":
+			health.EnqueueFailed = value
+		case "otelcol_exporter_send_failed_spans_total":
+			health.SendFailed = value
+		}
+	}
+
+	names := make([]string, 0, len(byExporter))
+	for name := range byExporter {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	path := copilot.TelemetryPath{
+		// Same join, same reason: no span carries a config_version, so it comes
+		// from the collector's own self-telemetry.
+		ConfigVersion: b.configVersion(ctx, service.Name),
+		PerExporter:   make([]copilot.ExporterHealth, 0, len(names)),
+	}
+	for _, name := range names {
+		path.PerExporter = append(path.PerExporter, *byExporter[name])
+	}
+	return path, nil
 }
 
 func (b *TempoPrometheus) getJSON(ctx context.Context, endpoint string, into any) error {
