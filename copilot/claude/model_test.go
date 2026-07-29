@@ -2,6 +2,7 @@ package claude_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -283,5 +284,84 @@ func TestATransportFailureReachesTheCallerIntact(t *testing.T) {
 	// The operator must be able to tell WHICH failure this was.
 	if !contains(err.Error(), "429") && !contains(err.Error(), "rate_limit") {
 		t.Errorf("the failure is unidentifiable: %v", err)
+	}
+}
+
+// THE TOOL SURFACE ACTUALLY REACHES THE WIRE, and until #17 nothing asserted it.
+//
+// Config.Tools existed from the first slice and no test ever set it: every model
+// test constructed a Client with no tools, so `tools` was absent from every
+// recorded request. A Client that dropped the surface entirely would have passed
+// the whole suite, and the first sign would have been a live Copilot that never
+// called a tool — a model answering from memory, which is the exact ungrounded
+// failure ADR 0009 is about.
+//
+// It is asserted against the ToolSet rather than a literal list, so a tool added
+// to copilot.PlatformTools is checked here without this test being edited.
+func TestTheModelIsShownExactlyTheToolSetsSchemas(t *testing.T) {
+	var sent []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		buf, _ := io.ReadAll(r.Body)
+		sent = buf
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(respThinkingThenText))
+	}))
+	t.Cleanup(srv.Close)
+
+	set, err := copilot.PlatformTools(&noStore{}, nil)
+	if err != nil {
+		t.Fatalf("PlatformTools: %v", err)
+	}
+
+	c, err := claude.New(claude.Config{
+		Model: "claude-opus-5", MaxTokens: 8192, BaseURL: srv.URL, APIKey: "not-a-real-key",
+		Tools: set,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if _, err := c.Next(context.Background(), copilot.NewConversation("?")); err != nil {
+		t.Fatalf("Next: %v", err)
+	}
+
+	var body map[string]any
+	if err := json.Unmarshal(sent, &body); err != nil {
+		t.Fatalf("the request body did not parse: %v", err)
+	}
+	tools, ok := body["tools"].([]any)
+	if !ok {
+		t.Fatal("the request carried no tools; the Copilot would answer from memory")
+	}
+	if len(tools) != len(set.Names()) {
+		t.Fatalf("%d tools on the wire, %d on the surface", len(tools), len(set.Names()))
+	}
+	for i, entry := range tools {
+		name, _ := entry.(map[string]any)["name"].(string)
+		if name != set.Names()[i] {
+			t.Errorf("wire position %d is %q, surface says %q", i, name, set.Names()[i])
+		}
+		if !set.Has(name) {
+			t.Errorf("%q was advertised to the model and the loop cannot dispatch it", name)
+		}
+	}
+}
+
+// A Client built with no tool surface must not panic. A zero Config is a legal
+// thing to construct — NewJudge takes the same Config and ignores Tools — so the
+// nil case is a real path, not a hypothetical one.
+func TestAClientWithNoToolSetStillSerializes(t *testing.T) {
+	c, sent := answering(t, respThinkingThenText)
+
+	if _, err := c.Next(context.Background(), copilot.NewConversation("?")); err != nil {
+		t.Fatalf("Next: %v", err)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(*sent, &body); err != nil {
+		t.Fatalf("the request body did not parse: %v", err)
+	}
+	if tools, present := body["tools"]; present {
+		if list, ok := tools.([]any); !ok || len(list) != 0 {
+			t.Errorf("a Client with no surface sent tools: %v", tools)
+		}
 	}
 }

@@ -328,9 +328,30 @@ func Run(ctx context.Context, m Model, store TraceStore, question string) (*Conv
 // A separate entry point rather than a fourth parameter on Run: a caller with no
 // path store should not have to pass a nil, and the two names say which evidence
 // the resulting summary was allowed to rest on.
+//
+// Both are now conveniences over RunWithTools, holding the P1 surface — one
+// TraceStore, one tool — steady while the surface itself grows (#17). A caller
+// that wants the whole surface builds a ToolSet and uses RunWithTools.
 func RunWithPath(ctx context.Context, m Model, store TraceStore, path TelemetryPathStore, question string) (*Conversation, error) {
 	if store == nil {
 		return nil, ErrNoTraceStore
+	}
+	tools, err := PlatformTools(store, path)
+	if err != nil {
+		return nil, err
+	}
+	return RunWithTools(ctx, m, tools, question)
+}
+
+// RunWithTools drives the loop over a whole tool surface.
+//
+// This is the entry point the tool-runner FSM will build on, and the reason it
+// takes a *ToolSet rather than a list of stores: the set the model was SHOWN and
+// the set this loop DISPATCHES are one object, so an FSM routing through here
+// cannot be handed a surface that advertises what it cannot answer.
+func RunWithTools(ctx context.Context, m Model, tools *ToolSet, question string) (*Conversation, error) {
+	if tools == nil || len(tools.order) == 0 {
+		return nil, ErrNoTools
 	}
 	c := NewConversation(question)
 
@@ -345,28 +366,21 @@ func RunWithPath(ctx context.Context, m Model, store TraceStore, path TelemetryP
 			return c, nil
 		}
 		for _, call := range next.Calls {
-			c.AppendToolResult(invoke(ctx, store, path, call))
+			c.AppendToolResult(tools.Invoke(ctx, call))
 		}
 	}
 	return c, fmt.Errorf("copilot: gave up after %d turns without an answer", MaxTurns)
 }
 
-// invoke runs one tool call.
+// queryTraces answers one query_traces call. It is the tool's handler, reached
+// only through a ToolSet — dispatch by name lives there, so this function starts
+// from "the model asked for this tool" rather than checking.
 //
-// Every error it can produce is authored HERE, in this package, from a constant
-// or from the tool name. A Backend's own error text is deliberately not passed
-// through: an error string from a Backend is as attacker-influenced as a span
-// name, and it would otherwise be the one telemetry-derived string that reached
-// the model outside of Evidence.
-func invoke(ctx context.Context, store TraceStore, paths TelemetryPathStore, call ToolUse) ToolResult {
-	if call.Name != QueryTracesTool {
-		// The name is echoed because a model that asked for the wrong tool needs
-		// to know which one — but it is MODEL-AUTHORED text going back into a
-		// message the model then reads, so it is bounded rather than trusted.
-		// Unbounded, it is a channel a model could write anything into.
-		return ToolResult{ToolUseID: call.ID, Err: "no such tool: " + boundedToolName(call.Name)}
-	}
-
+// Every error it can produce is authored HERE, in this package, from a constant.
+// A Backend's own error text is deliberately not passed through: an error string
+// from a Backend is as attacker-influenced as a span name, and it would otherwise
+// be the one telemetry-derived string that reached the model outside of Evidence.
+func queryTraces(ctx context.Context, store TraceStore, paths TelemetryPathStore, call ToolUse) ToolResult {
 	var in queryTracesInput
 	if err := json.Unmarshal(call.Input, &in); err != nil {
 		return ToolResult{ToolUseID: call.ID, Err: "the arguments were not valid JSON for this tool"}
