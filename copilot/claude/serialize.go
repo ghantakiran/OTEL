@@ -187,8 +187,8 @@ type evidenceJSON struct {
 // authored text in the same block as attacker-controlled values, and then the two
 // are one string.
 func renderResult(r copilot.ToolResult) string {
-	out := resultJSON{Traces: make([]evidenceJSON, 0, len(r.Evidence))}
-	for _, r := range r.Evidence {
+	out := resultJSON{Traces: make([]evidenceJSON, 0, len(r.Traces))}
+	for _, r := range r.Traces {
 		out.Traces = append(out.Traces, evidenceJSON{
 			TraceID:       r.TraceID,
 			ServiceName:   r.Service.Name,

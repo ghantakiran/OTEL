@@ -63,7 +63,7 @@ func conversation(t *testing.T) *copilot.Conversation {
 		Name:  copilot.QueryTracesTool,
 		Input: json.RawMessage(`{"service_name":"checkout-api"}`),
 	}})
-	c.AppendToolResult(copilot.ToolResult{ToolUseID: "toolu_01", Evidence: evidence()})
+	c.AppendToolResult(copilot.ToolResult{ToolUseID: "toolu_01", Traces: evidence()})
 	// A grounded summary quotes the evidence it cites — ADR 0009 requires it.
 	c.AppendAssistant("Trace fe3852be4562dca17922b0b2758ff910 has root span "+injected+".", nil)
 	return c
@@ -481,7 +481,7 @@ func TestTheTelemetryPathReachesTheModelInTheSameToolResult(t *testing.T) {
 	}})
 	c.AppendToolResult(copilot.ToolResult{
 		ToolUseID: "toolu_01",
-		Evidence:  evidence(),
+		Traces:    evidence(),
 		Path: &copilot.TelemetryPath{
 			ConfigVersion: "sha256:b76e871b",
 			PerExporter: []copilot.ExporterHealth{

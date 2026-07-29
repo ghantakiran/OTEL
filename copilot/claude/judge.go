@@ -126,7 +126,7 @@ func (j *SupportJudge) Supports(ctx context.Context, c grounding.Claim, evidence
 	// Reuses THE telemetry → string function rather than writing a second one.
 	// A judge that rendered evidence its own way would be judging a different
 	// document from the one the summary was written against.
-	rendered := renderResult(copilot.ToolResult{Evidence: evidence, Path: path})
+	rendered := renderResult(copilot.ToolResult{Traces: evidence, Path: path})
 
 	body, err := json.Marshal(judgeRequestJSON{Claim: c.Text, Evidence: json.RawMessage(rendered)})
 	if err != nil {

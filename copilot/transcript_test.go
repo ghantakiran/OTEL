@@ -69,7 +69,7 @@ func recordedExchange() *copilot.Conversation {
 	c.AppendAssistant("Looking at that service's traces.", queryTracesCall())
 	c.AppendToolResult(copilot.ToolResult{
 		ToolUseID: "toolu_01",
-		Evidence:  recordedEvidence(),
+		Traces:    recordedEvidence(),
 		Path:      recordedPath(),
 	})
 	// A grounded summary quotes the evidence it cites (ADR 0009).
@@ -105,7 +105,7 @@ func TestAnExchangeSurvivesTheRoundTripWithItsEvidenceStillTyped(t *testing.T) {
 	// The part that matters, asserted directly rather than left to DeepEqual: the
 	// evidence came back as records, on a tool-result turn, with nothing of it in
 	// any Text field.
-	ev := got.Evidence()
+	ev := got.Traces()
 	if !reflect.DeepEqual(ev, recordedEvidence()) {
 		t.Errorf("evidence did not survive as []TraceRef:\n got %+v\nwant %+v", ev, recordedEvidence())
 	}
@@ -160,7 +160,7 @@ func TestTheTelemetryPathSurvivesTheRoundTripAndSoDoesItsAbsence(t *testing.T) {
 	// And the absence.
 	none := copilot.NewConversation("Why is checkout-api slow?")
 	none.AppendAssistant("Looking.", queryTracesCall())
-	none.AppendToolResult(copilot.ToolResult{ToolUseID: "toolu_01", Evidence: recordedEvidence()})
+	none.AppendToolResult(copilot.ToolResult{ToolUseID: "toolu_01", Traces: recordedEvidence()})
 	if err := store.Save(ctx, "no-path", none); err != nil {
 		t.Fatalf("saving: %v", err)
 	}
@@ -198,7 +198,7 @@ func TestAToolErrorSurvivesTheRoundTripAsAnError(t *testing.T) {
 		if turn.Result.Err != "the query could not be answered" {
 			t.Errorf("the tool error did not survive: %q", turn.Result.Err)
 		}
-		if len(turn.Result.Evidence) != 0 {
+		if len(turn.Result.Traces) != 0 {
 			t.Error("an errored tool result reloaded with evidence attached")
 		}
 	}
@@ -327,8 +327,8 @@ func TestResumeAppendsTheFollowUpAsAnAuthoredUserTurn(t *testing.T) {
 	}
 	// The evidence from before the reload is still citable, which is what makes a
 	// follow-up answerable without re-querying.
-	if len(resumed.Evidence()) != 1 {
-		t.Errorf("got %d evidence records after resuming, want 1", len(resumed.Evidence()))
+	if len(resumed.Traces()) != 1 {
+		t.Errorf("got %d evidence records after resuming, want 1", len(resumed.Traces()))
 	}
 }
 
@@ -547,7 +547,7 @@ func TestAConversationThatWouldNotLoadIsNotWritten(t *testing.T) {
 	// loader would refuse, so it is asserted at the Marshal side directly.
 	c := copilot.NewConversation("Why is checkout-api slow?")
 	c.AppendAssistant("Looking.", queryTracesCall())
-	c.AppendToolResult(copilot.ToolResult{ToolUseID: "toolu_01", Evidence: recordedEvidence()})
+	c.AppendToolResult(copilot.ToolResult{ToolUseID: "toolu_01", Traces: recordedEvidence()})
 	if _, err := json.Marshal(c); err != nil {
 		t.Fatalf("a well-formed exchange failed to marshal: %v", err)
 	}
@@ -651,7 +651,7 @@ func TestTheStoredEvidenceIsAnArrayOnDiskAndNotAString(t *testing.T) {
 			Role   string `json:"role"`
 			Text   string `json:"text"`
 			Result *struct {
-				Evidence json.RawMessage `json:"evidence"`
+				Traces json.RawMessage `json:"traces"`
 			} `json:"result"`
 		} `json:"turns"`
 	}
@@ -674,7 +674,7 @@ func TestTheStoredEvidenceIsAnArrayOnDiskAndNotAString(t *testing.T) {
 			continue
 		}
 		sawEvidence = true
-		trimmed := strings.TrimSpace(string(turn.Result.Evidence))
+		trimmed := strings.TrimSpace(string(turn.Result.Traces))
 		if !strings.HasPrefix(trimmed, "[") {
 			t.Errorf("turn %d: stored evidence is not a JSON array: %s", i, trimmed)
 		}

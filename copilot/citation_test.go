@@ -19,7 +19,7 @@ func withEvidence(ids ...string) *copilot.Conversation {
 	for _, id := range ids {
 		refs = append(refs, copilot.TraceRef{TraceID: id})
 	}
-	c.AppendToolResult(copilot.ToolResult{ToolUseID: "toolu_01", Evidence: refs})
+	c.AppendToolResult(copilot.ToolResult{ToolUseID: "toolu_01", Traces: refs})
 	return c
 }
 
