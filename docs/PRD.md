@@ -53,6 +53,35 @@ A self-hosted Claude-driven assistant (Claude API + Tool Runner, `claude-opus-5`
 2. **M2 — Control Plane**: Contract×Profile compile, Agent+Gateway topology, GitOps distribution, multi-backend fan-out, self-observation, Pipeline Guardrails.
 3. **M3 — Copilot**: typed tool surface + Tool Runner loop, grounding, triage tiering, Eval Harness + Incident Corpus, Autonomy Ladder Advisor rung, Harm Set + promotion gate.
 
+### M3 progress
+
+**First slice delivered** (#16, #18): the typed tool surface and the Tool Runner
+loop run on `claude-opus-5` with a single vendor-neutral tool, `query_traces`,
+fronting a real Backend. Telemetry-path evidence rides on the same tool result, so
+a summary can tell a failing service from a failing telemetry path. Every claim in
+a summary is checked for **provenance** (was the cited trace fetched?) and
+**support** (does it bear the claim out?); claims that fail either, or that cite
+nothing, reach the operator marked rather than deleted.
+
+**Three partials, stated plainly**, because the mechanisms exist and the evidence
+that they work does not:
+
+| Partial | What is missing | Tracked by |
+|---|---|---|
+| Grounding is unmeasured | Support is judged by a mechanism nobody has scored against labelled incidents. A rule that has never been scored is a rule, not a property. | #53 → **#20** |
+| Injection resistance is structural, not behavioural | Hostile telemetry provably cannot reach the system prompt or a platform-authored user turn, and twelve adversarial fixtures now drive that through the real loop. Nothing measures whether the model's *answer* changes when hostile text arrives as legitimate evidence. | #54 → **#20** |
+| "Fleet-wide" means one host | The service-vs-telemetry-path distinction works against a real Backend, on one host and one Backend. | #51 |
+
+Two of the three are closed by the same thing: the **Eval Harness over an Incident
+Corpus** (#20), which is what turns grounding and injection resistance from
+mechanisms into scored properties — and it is the promotion gate for the Autonomy
+Ladder besides (ADR 0012). It is the next thing worth building. The remaining M3
+items — triage tiering (#19), the Advisor rung (#21), the Harm Set — are untouched.
+
+**Not yet built**: `query_metrics`, `query_logs`, `get_contract`, `get_standards`
+(P2, #17). The grounding mechanism does not need to change when they arrive — a
+Judge is handed evidence rather than going to find it.
+
 ## Open questions
 
 - Concrete promotion numbers (X% accuracy, N incidents) per rung — set with SRE org (ADR 0012).
