@@ -3,6 +3,7 @@ package claude_test
 import (
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -80,8 +81,10 @@ func answering(t *testing.T, body string) (*claude.Client, *[]byte) {
 	var sent []byte
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		buf := make([]byte, r.ContentLength)
-		_, _ = r.Body.Read(buf)
+		// io.ReadAll, not a single Read. Read may return a SHORT read, and the
+		// assertions below are absence checks — a truncated body would make
+		// "no sampling parameter reached the wire" pass for the wrong reason.
+		buf, _ := io.ReadAll(r.Body)
 		sent = buf
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(body))
@@ -245,4 +248,40 @@ func stringsIndex(h, n string) int {
 		}
 	}
 	return -1
+}
+
+// A transport or API failure reaches the caller intact.
+//
+// The contrast with a Backend's error text is deliberate. A tool's failure text
+// is swallowed because it goes back to the MODEL on the next turn, where an
+// attacker-influenced string would be read as content. This error goes to the
+// CALLER — Run returns it rather than appending it — so it never enters the
+// conversation, and swallowing it would cost an operator the difference between
+// a bad key, a rate limit and a network that is down. During an incident, that
+// is the wrong thing to lose.
+func TestATransportFailureReachesTheCallerIntact(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"type":"error","error":{"type":"rate_limit_error","message":"slow down"}}`))
+	}))
+	defer srv.Close()
+
+	c, err := claude.New(claude.Config{
+		Model: "claude-opus-5", MaxTokens: 8192, BaseURL: srv.URL, APIKey: "not-a-real-key",
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	_, err = c.Next(context.Background(), copilot.NewConversation("?"))
+	if err == nil {
+		t.Fatal("a rate-limited request came back as a successful turn")
+	}
+	if errors.Is(err, claude.ErrRefused) {
+		t.Error("a transport failure was reported as a model refusal")
+	}
+	// The operator must be able to tell WHICH failure this was.
+	if !contains(err.Error(), "429") && !contains(err.Error(), "rate_limit") {
+		t.Errorf("the failure is unidentifiable: %v", err)
+	}
 }

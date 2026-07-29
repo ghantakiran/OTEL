@@ -109,11 +109,16 @@ func (c *Client) Next(ctx context.Context, conv *copilot.Conversation) (copilot.
 
 	resp, err := c.api.Messages.New(ctx, req)
 	if err != nil {
-		// The API's own error text is not passed through. It can quote a service
-		// name or a label value back, and it is about to be read by the model on
-		// the next turn — the same reasoning that keeps a Backend's error text
-		// out of a ToolResult.
-		return copilot.Assistant{}, fmt.Errorf("copilot/claude: the model could not be reached: %w", errOpaque)
+		// THE ERROR IS PASSED THROUGH, and the contrast with a Backend's error
+		// text is the point. A tool's failure text is swallowed because it goes
+		// back to the MODEL on the next turn, where an attacker-influenced string
+		// would be read as content. This error goes to the CALLER — Run returns
+		// it rather than appending it, so it never enters the conversation at all.
+		//
+		// Swallowing it would cost an operator the difference between a bad key,
+		// a rate limit, and a network that is down, during an incident. That is
+		// the wrong trade for a tool whose job is telling failures apart.
+		return copilot.Assistant{}, fmt.Errorf("copilot/claude: the model could not be reached: %w", err)
 	}
 
 	// CHECKED BEFORE CONTENT IS READ. On a refusal `content` is empty, so
@@ -124,9 +129,6 @@ func (c *Client) Next(ctx context.Context, conv *copilot.Conversation) (copilot.
 
 	return assistantFrom(resp), nil
 }
-
-// errOpaque is what a transport or API failure is reported as. See Next.
-var errOpaque = errors.New("upstream request failed")
 
 // assistantFrom maps a response back into the loop's vocabulary.
 //
