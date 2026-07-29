@@ -102,18 +102,43 @@ mechanisms into scored properties — and it is the promotion gate for the Auton
 Ladder besides (ADR 0012).
 
 **Next slice — the tool-runner FSM.** The loop today is a bounded `for` with one
-exit that says anything (`MaxTurns` exhausted) and one that says nothing (the model
-stopped calling tools). An operator cannot tell an answer from a giving-up, and
-neither can an Eval Harness: #20 has to score outcomes, and "returned a
+exit that says anything (the hop budget exhausted) and one that says nothing (the
+model stopped calling tools). An operator cannot tell an answer from a giving-up,
+and neither can an Eval Harness: #20 has to score outcomes, and "returned a
 conversation" is not an outcome. So the loop becomes a small state machine with
 **typed exit reasons**:
 
 | Exit | Meaning |
 |---|---|
-| `answered` | The model stopped calling tools and produced a summary. |
-| `hop_limit` | The turn budget ran out first. Not an answer. |
-| `tool_error` | A tool could not answer, and the loop stopped rather than continuing on partial evidence. |
-| `grounding_rejected` | The summary was produced and the grounding check refused it. |
+| `answered` | The model stopped calling tools and produced a non-empty summary. |
+| `empty_answer` | The model stopped calling tools and produced nothing. **Not an answer**, and a distinct exit rather than a branch hidden inside `answered` — a run that looks like the good path and is not is the one an Eval Harness must never score as success. |
+| `hop_limit` | The hop budget ran out first. Not an answer. |
+| `tool_exhausted` | N consecutive tool calls failed with no successful call between them. |
+| `model_error` | The model turn itself failed — unreachable, rate-limited, or malformed. Distinct from a tool failing: a Backend that cannot answer and a model that cannot be reached are different operational responses, and today this is the exit the loop most often produces. |
+| `cancelled` | The context was cancelled or its deadline expired — an operator aborting, or a timeout. **#20 must not score this as a failed answer**; it is an absence of a result, not a wrong one. |
+
+Three decisions behind that table, recorded because the names alone do not carry
+them:
+
+**A failing tool does not end the run.** `invoke` returns a `ToolResult` with `Err`
+set and the loop continues, deliberately, so the model can adapt — that is what the
+bounded tool-name echo exists for. That behaviour does not change. `tool_exhausted`
+is a **new terminal condition layered above it**: N consecutive failures with no
+success between them, N configurable with a small default (3). One failed call is
+information; three in a row with nothing working is a loop that is not going to
+converge.
+
+**Grounding rejection is not an exit.** It is deliberately absent from the table. A
+rejected summary costs a hop and the model retries; it never terminates the run.
+That keeps ADR 0009's "marked, not deleted" (#66) intact — an operator gets an
+annotated summary rather than nothing when grounding is strict — and it keeps the
+loop's dependencies unchanged: `copilot` imports nothing from `copilot/grounding`,
+and adding a terminal grounding exit would have inverted that by putting a Judge
+inside the loop.
+
+**"Hop", not "turn".** The glossary says hop; the code says `MaxTurns`. The FSM PR
+renames it to `MaxHops` (aliasing the old name) so the two agree, rather than
+leaving a synonym for a load-bearing bound.
 
 This is also where the transcript store gets wired in — a bounded loop that can
 resume is the shape that needs one. Then #20, which the typed exits are a
