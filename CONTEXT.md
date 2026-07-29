@@ -18,6 +18,10 @@ _Avoid_: Autonomy level, permission tier
 The Copilot's current position on the Autonomy Ladder — Advisor, Gated, or Bounded Autonomy — which fixes what actions it may take.
 _Avoid_: Mode, level, state
 
+**Copilot Model**:
+Which Claude model a Copilot slice runs on, named in exactly one place per tier so the spec and the code cannot drift (#55). **`claude-opus-5`** for incident summaries and deep root-cause reasoning — the work is intelligence-sensitive because a grounded summary must cite real evidence rather than fabricate a plausible one. **`claude-haiku-4-5`** for first-pass triage (#19), escalating to `claude-opus-5` only for incidents that need full RCA; that split is the cost design, not an optimization. Two properties of the current model shape the code: sampling parameters (`temperature`, `top_p`, `top_k`) are rejected outright, and thinking is on by default with `max_tokens` capping thinking *plus* response text together.
+_Avoid_: The model, the LLM, GPT, Claude (bare), a model version without its tier
+
 **Typed Tool**:
 One of the vendor-neutral tools the Copilot is given, and the only way it can learn anything (`query_traces`, and later `query_metrics` / `query_logs` / `get_contract` / `get_standards`). Its parameters are typed fields, never free text, so no Backend's query language can cross into a prompt — swapping a Backend changes one adapter and leaves every prompt untouched (ADR 0007, ADR 0011). What a Typed Tool returns is a Trace Reference and its kin, never prose.
 _Avoid_: Function, API, endpoint, capability, skill

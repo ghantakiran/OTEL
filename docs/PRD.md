@@ -40,7 +40,7 @@ The Control Plane **Compiles** a Telemetry Contract with its tier's **Pipeline P
 
 ## Layer 3 — Copilot
 
-A self-hosted Claude-driven assistant (Claude API + Tool Runner, `claude-opus-4-8`) that reads standardized telemetry through vendor-neutral typed tools and assists incident response (ADR 0011). Telemetry always enters as data, never as instructions. Output is **Grounded** in evidence; an **Eval Harness** over an **Incident Corpus** scores accuracy and gates promotion up the **Autonomy Ladder** (Advisor → Gated → Bounded), with a **Harm Set** zero-harm gate for action rungs (ADR 0008, 0009, 0012). Cost: haiku-4-5 triage → opus-4-8 deep RCA.
+A self-hosted Claude-driven assistant (Claude API + Tool Runner, `claude-opus-5`) that reads standardized telemetry through vendor-neutral typed tools and assists incident response (ADR 0011). Telemetry always enters as data, never as instructions. Output is **Grounded** in evidence; an **Eval Harness** over an **Incident Corpus** scores accuracy and gates promotion up the **Autonomy Ladder** (Advisor → Gated → Bounded), with a **Harm Set** zero-harm gate for action rungs (ADR 0008, 0009, 0012). Cost: `claude-haiku-4-5` triage → `claude-opus-5` deep RCA.
 
 **User stories**
 - As on-call, I get an incident summary with ranked root-cause hypotheses, each citing the trace/metric/log it rests on.
