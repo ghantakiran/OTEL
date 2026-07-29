@@ -4,9 +4,25 @@ Layer 3 begins here. This is the seam between a model and the platform's
 telemetry: what the Copilot may ask, what it gets back, and — the part that
 matters most — what can and cannot reach a prompt.
 
-Nothing in this page calls a model. The first P1 slice is the **data path and the
-tool seam**; the loop that actually talks to Claude comes next, on top of exactly
-these types.
+## Current state of Layer 3
+
+The tracer bullet is built. The loop runs on `claude-opus-5`, `query_traces`
+fronts a real Backend, the telemetry path rides in the same tool result, and a
+summary's claims are checked for both provenance and support before an operator
+reads them.
+
+What is **not** built is worth as much as what is, so it is named here rather than
+left to be discovered:
+
+| Partial | What is true | What is not | Tracked by |
+|---|---|---|---|
+| **Provenance vs support** | Every cited trace was really fetched, and a judge is asked whether it bears the claim out. Unsupported and uncited claims reach the operator marked. | Nobody has measured whether the judge is any good. A rule that has never been scored is a rule, not a property. | #53 — mechanism in #18, **measurement in #20** |
+| **Structural vs tested** | Telemetry cannot reach the system prompt or a platform-authored user turn, and twelve hostile fixtures now drive that boundary through the real loop. | Nothing measures whether the model's *answer* changes when hostile text arrives. Channel safety is not answer safety, and models do not enforce channel semantics. | #54 — fixtures in #18, **scoring in #20** |
+| **One host vs fleet-wide** | The service-failure / telemetry-path distinction works against a real Backend rendering real collector self-telemetry. | "Confirmed fleet-wide" has only ever been confirmed on one host and one Backend. | #51 |
+
+Each of the three has the same shape: the mechanism exists and the evidence that
+it works does not. #20's Eval Harness and Incident Corpus is the missing half of
+two of them, which is why it is the next thing worth building.
 
 ## The one question, and its shape
 
@@ -251,17 +267,105 @@ nothing at all, which is the exact failure ADR 0009 is about.
 
 Provenance is the cheaper check and it looks like the expensive one. A summary
 whose every ID is real reads as verified; it is only **un-hallucinated**. #18
-supplies the mechanism for support and #20 measures it.
+supplies the mechanism for support, below, and #20 measures it.
+
+## Grounding enforcement — support, and what a claim is worth
+
+`copilot/grounding` turns a summary into claims and gives each one a verdict.
+
+A **claim is a sentence**, and that is a heuristic worth naming as one. The better
+long-term shape is for the model to emit claims structurally, each carrying its
+own citations, so nothing is inferred from punctuation. Sentence splitting is what
+makes this checkable today without changing how summaries are generated, and the
+Judge seam does not depend on it — structured claims would change one file.
+
+Four verdicts, because "not supported" hides three failures an operator responds
+to differently:
+
+| Verdict | Meaning |
+|---|---|
+| `supported` | Cited evidence was fetched, and a judge read it against the claim and said it holds. |
+| `unsupported` | Either the claim cites a trace nobody fetched (the ID is named), or the judge read real evidence and said it does not show this. |
+| `uncited` | The claim rests on no trace at all — the ungrounded hypothesis ADR 0009 is actually about. |
+| `unchecked` | The judge could not answer. **Not a pass.** |
+
+**Provenance runs first, and it can settle a claim alone.** The judge is asked only
+about claims whose every citation was really fetched. Asking a judge about a trace
+that does not exist invites a confident verdict on nothing — it would have only
+the claim to go on and would answer from it, which is the fabrication one step
+removed.
+
+**It fails closed.** A judge error or a missing judge produces `unchecked`, never
+`supported`. The opposite default is the dangerous one: an outage in the checker
+would silently promote every claim to verified, and the summary would read as most
+trustworthy at the moment the check stopped running.
+
+**Claims are marked, not deleted.** ADR 0009 permits suppressing or flagging;
+flagging is the one that leaves a reader able to audit. A dropped sentence loses
+something an operator may need — including the fact that the Copilot asserted
+something it could not back, which is itself a signal. `Summary.Raw` keeps the
+model's unedited answer for the same reason, and because #20 scores the model
+rather than the marker. A fully supported summary comes back **unchanged**: if
+everything were marked, the markers would mean nothing.
+
+The **Judge** is an interface, and the only implementation is
+`claude.SupportJudge`. Deciding support needs a reader; the only reader is a
+model; a model means a vendor SDK — so it lives in the one package allowed to know
+a vendor exists. The judge is shown **no tools**: evidence it fetched itself would
+not be evidence the claim cited. It must answer `SUPPORTED` or `UNSUPPORTED` and
+nothing else, because a judge allowed to explain itself produces output that has
+to be interpreted, and interpreting a paragraph is how "suggestive but not
+conclusive" becomes a pass.
+
+One honest weakness, recorded rather than smoothed over: the judge's user turn
+carries a JSON document holding the claim *and* the evidence, because there is no
+`tool_result` block available — a judge makes no tool calls. A grounded summary
+quotes what it cites, so the claim itself can carry an attacker-controlled span
+name. The separation there is the system/user split plus JSON framing, not a
+distinct block type. That is weaker than the loop's guarantee, and it is what
+#54's fixtures probe and #20's corpus would measure.
+
+## Adversarial fixtures — attacking our own guarantee
+
+`copilot/adversarial` is a corpus of hostile telemetry driven through the **real
+loop**, not a hand-built conversation. Twelve vectors, one per attacker-controlled
+field, because the boundary is per-field: a serializer safe for span names and
+unsafe for exporter names is only half safe.
+
+Span names, `service.name`, `service.namespace`, Service Tier, Config Version (on
+a trace and on the path), exporter names — plus techniques rather than fields:
+fake turn framing, system-prompt mimicry, JSON escape attempts, control and
+zero-width characters. And one that must reach the model *nowhere*: a Backend's
+own error string, which the loop swallows because it authors every failure message
+from its own constants.
+
+The tests assert the channel: hostile text never appears in the system prompt or a
+platform-authored user turn, and appears only inside a `tool_result` block and in
+assistant text quoting it. That last part is deliberate — a grounded summary
+**must** quote its evidence, so hostile text in an assistant turn is the Copilot
+working. A check that forbade it would be forbidding grounding, and a security
+check that fails on correct behaviour is one that gets loosened under deadline
+pressure.
+
+What these fixtures cannot show is that the model's answer is unchanged. They
+measure the channel; #20 measures the answer. `Fixture` is a plain value with no
+test dependency precisely so the Incident Corpus can lift the same vectors and
+score them.
 
 ## Where #16 stands
 
 | Criterion | Status |
 |---|---|
 | Tool Runner loop with a `query_traces` typed tool | ✅ |
-| Summary citing the traces it used | **Partial → #53** — provenance checked, support not |
-| Telemetry as tool-result content, never instructions | ✅ at the wire — **Partial → #54**: structural, never adversarially tested |
-| Distinguishes service failure from telemetry-path failure | **Partial → #51** — real Backend queries (#50); one host, not a fleet |
+| Summary citing the traces it used | **Partial → #53** — provenance ✅ and support now checked (#18); unmeasured until #20 |
+| Telemetry as tool-result content, never instructions | ✅ at the wire, now adversarially exercised (#18) — **Partial → #54**: the channel is tested, the answer is not |
+| Distinguishes service failure from telemetry-path failure | **Partial → #51** — real Backend queries ✅ (#50); one host, not a fleet |
 | No vendor query language crosses the tool seam | ✅ |
+
+The two partials moved but did not close, and the distinction is the point. #53
+was "nothing checks support"; it is now "support is checked by a mechanism nobody
+has scored". #54 was "never tested"; it is now "the channel is tested, the model's
+answer is not". Both need #20.
 
 ## What this still does not do
 

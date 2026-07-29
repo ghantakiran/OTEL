@@ -39,7 +39,7 @@ The state of the road a service's telemetry travelled, as opposed to the state o
 _Avoid_: Pipeline health, collector status, delivery metrics, exporter stats
 
 **Grounding**:
-The requirement that every claim the Copilot makes cites the specific telemetry evidence behind it (a trace, metric query, or log query); an ungrounded hypothesis is suppressed or flagged low-confidence.
+The requirement that every claim the Copilot makes cites the specific telemetry evidence behind it (a trace, metric query, or log query); an ungrounded hypothesis is suppressed or flagged low-confidence. It is **two checks, and P1 delivered only the first** — see Citation Provenance for the distinction, which is the one place this term is most often over-read. Provenance asks whether the cited trace was fetched; *support* asks whether it bears the claim out, and a real trace cited for something it does not show is still ungrounded. Support is checked by a Judge that reads the claim and its evidence together, and a claim that fails — or that cites nothing at all — reaches the operator **marked rather than deleted**, because a silently edited summary cannot be audited. What no amount of checking establishes is whether the checking is any good: that is scored by the Eval Harness over the Incident Corpus, and until then Grounding is a mechanism rather than a measured property.
 _Avoid_: Citation, sourcing, attribution
 
 **Eval Harness**:

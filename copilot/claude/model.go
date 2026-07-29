@@ -80,6 +80,25 @@ func New(cfg Config) (*Client, error) {
 		return nil, ErrNoMaxTokens
 	}
 
+	return &Client{
+		api:       anthropic.NewClient(requestOptions(cfg)...),
+		model:     cfg.Model,
+		maxTokens: cfg.MaxTokens,
+		tools:     cfg.Tools,
+	}, nil
+}
+
+// requestOptions turns the transport half of a Config into SDK options.
+//
+// Shared by New and NewJudge so the two are pointed at the same host with the
+// same credential by construction. A judge that silently talked to the default
+// endpoint while the loop was under test would make every grounding test either a
+// live call or an unexplained failure.
+//
+// An empty field means "let the SDK resolve it": no BaseURL is the real API, and
+// no APIKey is the environment — which is what a deployment wants and what a test
+// never relies on.
+func requestOptions(cfg Config) []option.RequestOption {
 	var opts []option.RequestOption
 	if cfg.BaseURL != "" {
 		opts = append(opts, option.WithBaseURL(cfg.BaseURL))
@@ -87,13 +106,7 @@ func New(cfg Config) (*Client, error) {
 	if cfg.APIKey != "" {
 		opts = append(opts, option.WithAPIKey(cfg.APIKey))
 	}
-
-	return &Client{
-		api:       anthropic.NewClient(opts...),
-		model:     cfg.Model,
-		maxTokens: cfg.MaxTokens,
-		tools:     cfg.Tools,
-	}, nil
+	return opts
 }
 
 // Next is one model turn.
