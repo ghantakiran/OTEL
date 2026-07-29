@@ -63,6 +63,30 @@ a summary is checked for **provenance** (was the cited trace fetched?) and
 **support** (does it bear the claim out?); claims that fail either, or that cite
 nothing, reach the operator marked rather than deleted.
 
+**Second slice delivered** (transcript persistence): an exchange now survives the
+process that made it. `copilot.TranscriptStore` (with a file-backed
+implementation) writes a Conversation to a typed JSON document and reads it back,
+and `copilot.Resume` appends the operator's follow-up to a reloaded exchange.
+
+The point of the slice is what the format refuses. Within one turn, ADR 0011's
+block-level separation is held by the type — `ToolResult.Evidence` is
+`[]TraceRef`, not a string. Across a save and a load it would only be as good as
+the wire format, so evidence is stored as a JSON array and a document that carries
+telemetry anywhere else does not load: a tool-result turn with text on it, an
+authored turn with a result attached, or — the shape a flattening store actually
+produces — a tool call with no tool-result turn answering it. A stored system
+prompt that is not this build's constant is refused rather than installed, because
+the system prompt is the operator channel and a transcript is a file on a disk.
+
+Three refusals are **mutation-tested** rather than assumed: removing the
+call/result pairing check, removing the tool-result text rule, and flipping the
+serializer back to concatenating evidence into a user text block each turn a named
+test red.
+
+**Not wired into the loop.** `Run`/`RunWithPath` are untouched: `Resume` hands back
+a `*Conversation` and stops there. What a resumed exchange costs in turns, and how
+it should end, is the tool-runner FSM's question — the next slice, below.
+
 **Three partials, stated plainly**, because the mechanisms exist and the evidence
 that they work does not:
 
@@ -75,8 +99,26 @@ that they work does not:
 Two of the three are closed by the same thing: the **Eval Harness over an Incident
 Corpus** (#20), which is what turns grounding and injection resistance from
 mechanisms into scored properties — and it is the promotion gate for the Autonomy
-Ladder besides (ADR 0012). It is the next thing worth building. The remaining M3
-items — triage tiering (#19), the Advisor rung (#21), the Harm Set — are untouched.
+Ladder besides (ADR 0012).
+
+**Next slice — the tool-runner FSM.** The loop today is a bounded `for` with one
+exit that says anything (`MaxTurns` exhausted) and one that says nothing (the model
+stopped calling tools). An operator cannot tell an answer from a giving-up, and
+neither can an Eval Harness: #20 has to score outcomes, and "returned a
+conversation" is not an outcome. So the loop becomes a small state machine with
+**typed exit reasons**:
+
+| Exit | Meaning |
+|---|---|
+| `answered` | The model stopped calling tools and produced a summary. |
+| `hop_limit` | The turn budget ran out first. Not an answer. |
+| `tool_error` | A tool could not answer, and the loop stopped rather than continuing on partial evidence. |
+| `grounding_rejected` | The summary was produced and the grounding check refused it. |
+
+This is also where the transcript store gets wired in — a bounded loop that can
+resume is the shape that needs one. Then #20, which the typed exits are a
+precondition for. The remaining M3 items — triage tiering (#19), the Advisor rung
+(#21), the Harm Set — are untouched.
 
 **Not yet built**: `query_metrics`, `query_logs`, `get_contract`, `get_standards`
 (P2, #17). The grounding mechanism does not need to change when they arrive — a
