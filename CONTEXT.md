@@ -240,3 +240,5 @@ _Avoid_: Cutoff, go-live, launch date
 ## Flagged ambiguities
 
 - "Guardrail" was used to mean both static (CI/CD) and runtime (collector) enforcement — resolved: **Guardrail** is an umbrella term with two distinct children, **Preflight Guardrail** and **Pipeline Guardrail**.
+- graphify reported `NewPreflight()` as a cross-community bridge to the Claude Judge / model client — a doc-co-occurrence artifact of the semantic extraction pass, confirmed false by direct grep: there is no such coupling in the code.
+- Treat every `[INFERRED]` edge in graphify's **Surprising Connections** as a hypothesis and check it against the AST layer before acting on it; only `[EXTRACTED]` edges are structural.
